@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    k8s-app: swiftkube
+    pod-security.kubernetes.io/enforce: privileged
+  name: swiftkube
+
+---
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: swiftlet 
+  namespace: swiftkube
+spec:
+  selector:
+    matchLabels:
+      name: swiftlet 
+  template:
+    metadata:
+      labels:
+        name: swiftlet 
+    spec:
+      serviceAccountName: swiftkube-service-account
+      containers:
+        - name: swiftlet 
+          image: emoslab.registry:6000/swiftkube/swiftlet:dev 
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+          imagePullPolicy: Always 
+          command:
+            - /usr/local/bin/swiftlet 
+          env:
+            - name: MY_NODE_NAME 
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory 

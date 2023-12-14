@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: swift-controller-manager 
+  namespace: kube-system 
+  labels:
+    name: swift-controller-manager  
+spec:
+  serviceAccountName: swiftkube-service-account
+  containers:
+    - name: swift-controller-manager
+      image: emoslab.registry:6000/swiftkube/swift-controller-manager:dev 
+      imagePullPolicy: Always 
+      command:
+        - /usr/local/bin/swift-controller-manager 
+

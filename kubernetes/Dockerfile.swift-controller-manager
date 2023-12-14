@@ -1,0 +1,3 @@
+FROM ubuntu:22.04 
+
+COPY bin/swift-controller-manager /usr/local/bin/ 

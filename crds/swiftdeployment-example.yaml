@@ -1,0 +1,40 @@
+apiVersion: swiftkube.io/v1alpha1
+kind: SwiftDeployment
+metadata:
+  name: example-swiftdeployment 
+spec:
+  serviceName: file-uploader 
+  replicas: 1
+  runningReplicas: 1
+  deploymentTemplate:
+    spec: 
+      replicas: 1
+      selector:
+        matchLabels:
+          app: file-uploader
+      template:
+        metadata:
+          labels:
+            app: file-uploader
+        spec: 
+          nodeName: vm-arm64-node1
+          containers:
+            - name: file-uploader
+              image: emoslab.registry:6000/easydemo/file-uploader:11
+              imagePullPolicy: Always
+              ports:
+                - containerPort: 8080
+                  protocol: TCP
+              command:
+                - java 
+              args:
+                - -jar
+                - /FileUploader-1.0-SNAPSHOT.jar
+  serviceTemplate: 
+    spec:
+      type: NodePort
+      ports:
+      - port: 8080
+        nodePort: 8400
+      selector:
+        app: file-uploader
