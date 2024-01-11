@@ -11,34 +11,39 @@ metadata:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: swiftlet 
+  name: swift-monitor
   namespace: swiftkube
 spec:
   selector:
     matchLabels:
-      name: swiftlet 
+      name: swift-monitor
   template:
     metadata:
       labels:
-        name: swiftlet 
+        name: swift-monitor
     spec:
       serviceAccountName: swiftkube-service-account
       containers:
-        - name: swiftlet 
-          image: registry:5000/swiftkube/swiftlet:dev 
+        - name: swift-monitor 
+          image: registry:5000/swiftkube/swift-monitor:dev 
+          ports:
+            - containerPort: 10000
+              hostPort: 10000
+              name: http
+              protocol: TCP 
           volumeMounts:
-            - name: sys
-              mountPath: /sys
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
           imagePullPolicy: Always 
           command:
-            - /usr/local/bin/swiftlet 
+            - /usr/local/bin/swift-monitor
           env:
             - name: MY_NODE_NAME 
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
       volumes:
-        - name: sys
+        - name: cgroup
           hostPath:
-            path: /sys
+            path: /sys/fs/cgroup
             type: Directory 

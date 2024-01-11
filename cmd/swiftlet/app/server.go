@@ -14,10 +14,10 @@ import (
 	kuberest "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
-	"swiftkube.io/swiftkube/pkg/signals"
 
 	skclientset "swiftkube.io/swiftkube/pkg/generated/clientset/versioned"
 	skinformers "swiftkube.io/swiftkube/pkg/generated/informers/externalversions"
+	"swiftkube.io/swiftkube/pkg/signals"
 	swiftlet "swiftkube.io/swiftkube/pkg/swiftlet"
 )
 

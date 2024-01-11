@@ -1,15 +1,25 @@
 apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    k8s-app: swiftkube
+    pod-security.kubernetes.io/enforce: privileged
+  name: swiftkube
+
+---
+
+apiVersion: v1
 kind: Pod
 metadata:
   name: swift-controller-manager 
-  namespace: kube-system 
+  namespace: swiftkube 
   labels:
     name: swift-controller-manager  
 spec:
   serviceAccountName: swiftkube-service-account
   containers:
     - name: swift-controller-manager
-      image: emoslab.registry:6000/swiftkube/swift-controller-manager:dev 
+      image: registry:5000/swiftkube/swift-controller-manager:dev 
       imagePullPolicy: Always 
       command:
         - /usr/local/bin/swift-controller-manager 
