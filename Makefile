@@ -3,7 +3,7 @@ OUTPUT = bin
 REPO := registry:5000
 TAG := dev 
 
-BUILD_TGTS = build_controller build_swiftlet build_monitor 
+BUILD_TGTS = build_appmanager build_podmanager build_ctl build_agent 
 
 all: ${BUILD_TGTS} build-image
 
@@ -12,14 +12,22 @@ build-image: ${BUILD_TGTS}
 	docker build -t ${REPO}/swiftkube/swift-controller-manager:${TAG} -f kubernetes/Dockerfile.swift-controller-manager .
 	docker build -t ${REPO}/swiftkube/swift-monitor:${TAG} -f kubernetes/Dockerfile.swift-monitor . 
 
-build_controller: ${OUTPUT}
-	${GO_BIN} build -o ${OUTPUT}/swift-controller-manager cmd/swift-controller-manager/controller-manager.go
+build_binary: ${BUILD_TGTS}
 
-build_swiftlet: ${OUTPUT}
-	${GO_BIN} build -o ${OUTPUT}/swiftlet cmd/swiftlet/swiftlet.go 
+build_agent: ${OUTPUT}
+	${GO_BIN} build -o ${OUTPUT}/genesis-agent cmd/genesis-agent/main.go 
 
-build_monitor:
-	${GO_BIN} build -o ${OUTPUT}/swift-monitor cmd/swift-monitor/monitor.go 
+build_ctl: ${OUTPUT}
+	${GO_BIN} build -o ${OUTPUT}/genesisctl cmd/genesisctl/main.go 
+
+build_appmanager: ${OUTPUT} 
+	${GO_BIN} build -o ${OUTPUT}/appmanager cmd/appmanager/main.go
+
+#build_swiftlet: ${OUTPUT}
+#	${GO_BIN} build -o ${OUTPUT}/swiftlet cmd/swiftlet/swiftlet.go 
+
+build_podmanager:
+	${GO_BIN} build -o ${OUTPUT}/podmanager cmd/podmanager/main.go 
 
 ${OUTPUT}:
 	@if test -d ${OUTPUT}; then  \
@@ -49,6 +57,29 @@ install_all: create_serviceaccount
 
 install_monitor: create_serviceaccount
 	kubectl apply -f kubernetes/swift-monitor.yaml 
+
+push_podmanager:
+	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
+	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
+
+setup_podmanager:
+	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager > /var/log/podmanager.log 2>&1'"
+
+resetup_podmanager: build_podmanager 
+	-ansible myhosts -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
+	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
+	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
+	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager > /var/log/podmanager.log 2>&1'"
+
+stop_podmanager:
+	ansible myhosts -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
+
+setup_appmanager:
+	cp bin/appmanager /usr/local/bin/appmanager 
+	tmux new-session -s appmanager -d 'appmanager > /var/log/appmanager.log 2>&1'
+
+stop_appmanager:
+	tmux kill-session -t appmanager 
 
 .PHONY: clean 
 clean:

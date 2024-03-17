@@ -26,6 +26,8 @@ spec:
       containers:
         - name: swift-monitor 
           image: registry:5000/swiftkube/swift-monitor:dev 
+          securityContext:
+            privileged: true
           ports:
             - containerPort: 10000
               hostPort: 10000
@@ -34,6 +36,8 @@ spec:
           volumeMounts:
             - name: cgroup
               mountPath: /sys/fs/cgroup
+            - name: swapin 
+              mountPath: /dev 
           imagePullPolicy: Always 
           command:
             - /usr/local/bin/swift-monitor
@@ -43,7 +47,13 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
       volumes:
-        - name: cgroup
+        - 
+          name: cgroup
           hostPath:
             path: /sys/fs/cgroup
+            type: Directory 
+        -
+          name: swapin 
+          hostPath:
+            path: /dev 
             type: Directory 
