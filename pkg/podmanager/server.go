@@ -3,13 +3,14 @@ package podmanager
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/moby/ipvs"
 	"github.com/spf13/cobra"
 
 	corev1 "k8s.io/api/core/v1"
@@ -175,21 +176,46 @@ func (manager *PodManager) GetPodInfo(key string) *PodInfo {
 
 const defaultIPVSWeight int64 = 100
 
-func editIPVSWeight(realServer string, weight int64) error {
-	tcpService := ""
+func editIPVSWeight(realServerIP string, realServerPort uint16, weight int64) error {
+	handle, err := ipvs.New("")
 
-	cmd := exec.Command(
-		"ipvsadm", "-e",
-		"--real-server", realServer,
-		"--tcp-service", tcpService,
-		"--weight", strconv.FormatInt(weight, 10),
-		"----masquerading",
-	)
+	if err != nil {
+		return err
+	}
+	svcs, err := handle.GetServices()
+	if err != nil {
+		return err
+	}
+	for _, svc := range svcs {
+		dests, err := handle.GetDestinations(svc)
+		if err != nil {
+			return err
+		}
 
-	return cmd.Run()
+		for _, dest := range dests {
+			if dest.Address.Equal(net.ParseIP(realServerIP)) && dest.Port == realServerPort {
+				dest.Weight = int(weight)
+				return handle.UpdateDestination(svc, dest)
+			}
+		}
+	}
+
+	/*
+		cmd := exec.Command(
+			"ipvsadm", "-e",
+			"--real-server", fmt.Sprintf("%s:%d", realServerIP, realServerPort),
+			"--tcp-service", fmt.Sprintf("%s:%d", service.Address.String(), service.Port),
+			"--weight", strconv.FormatInt(weight, 10),
+			"----masquerading",
+		)
+
+		return cmd.Run()
+	*/
+
+	return fmt.Errorf("not found real server")
 }
 
-func (c *PodManager) syncHandler(ctx context.Context, key string) error {
+func (c *PodManager) syncHandler(_ context.Context, key string) error {
 	// Convert the namespace/name string into a distinct namespace and name
 
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -216,20 +242,22 @@ func (c *PodManager) syncHandler(ctx context.Context, key string) error {
 
 	// ipvsadm -e --real-server 172.30.4.97:18856 --tcp-service 10.4.233.75:18856 -w 500 -m
 	// set ipvs weight
-	/*
-		weightStr, ok := pod.GetLabels()["swiftkube.io/ipvs-weight"]
-		if ok {
-			weight, err := strconv.ParseInt(weightStr, 10, 64)
-			podIP := pod.Status.PodIP
-			containerPort := pod.Spec.Containers[0].Ports[0].ContainerPort
+	weightStr, ok := pod.GetLabels()["swiftkube.io/ipvs-weight"]
+	if ok {
+		weight, err := strconv.ParseInt(weightStr, 10, 64)
+		podIP := pod.Status.PodIP
+		containerPort := pod.Spec.Containers[0].Ports[0].ContainerPort
 
-			if err != nil {
-				klog.ErrorS(err, "parse int failed")
-				weight = defaultIPVSWeight
-			}
-
+		if err != nil {
+			klog.ErrorS(err, "parse int failed")
+			weight = defaultIPVSWeight
 		}
-	*/
+
+		err = editIPVSWeight(podIP, uint16(containerPort), weight)
+		if err != nil {
+			klog.ErrorS(err, "edit ipvs real server weight failed")
+		}
+	}
 
 	if pod.Spec.NodeName != c.NodeName {
 		c.PodMap.Delete(key)
