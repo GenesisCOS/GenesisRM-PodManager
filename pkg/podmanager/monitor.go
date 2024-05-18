@@ -27,56 +27,78 @@ type Monitor struct {
 	manager *PodManager
 }
 
+func (c *Monitor) parseResponse(pInfo *PodInfo, v *MetricDataPoint) []byte {
+	if pInfo.Pod == nil {
+		return []byte("")
+	}
+	if v.ContainerMemStat == nil {
+		return []byte("")
+	}
+	state, ok := pInfo.Pod.GetLabels()["swiftkube.io/state"]
+	if !ok {
+		state = "None"
+	}
+	// cgroup CPU quotas
+	out := fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		cgroupCPUAcctUsageName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPUUsage)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %f\n",
+		cgroupCPUQuotaName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPUQuota)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %f\n",
+		cgroupPodCPUQuotaName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.PodCPUQuota)
+
+	// Container memory.stat
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		cgroupMemStatUsageInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.RSS+v.ContainerMemStat.Cache)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		cgroupMemStatSwapInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.Swap)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		cgroupMemStatRssInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.RSS)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		cgroupMemStatCacheInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.Cache)
+
+	// K8s stats
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		swiftMonitorK8sPodMemoryRequest, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.MemRequest)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		swiftMonitorK8sPodCpuRequest, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPURequest)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		swiftMonitorK8sPodMemoryLimit, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.MemLimit)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		swiftMonitorK8sPodCpuLimit, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPULimit)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		swiftMonitorK8sPodCpuAllocated, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPUAllocated)
+
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		swiftMonitorK8sPodMemoryAllocated, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.MemAllocated)
+
+	return []byte(out)
+}
+
 func (c *Monitor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	metrics := c.manager.CollectMetrics()
 
 	for k, v := range metrics {
 		loadVal, ok := c.manager.GetPodMap().Load(k)
-		pInfo := loadVal.(*PodInfo)
 		if ok {
-			// cgroup CPU quotas
-			out := fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				cgroupCPUAcctUsageName, pInfo.Pod.Name, pInfo.Pod.Namespace, v.CPUUsage)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %f\n",
-				cgroupCPUQuotaName, pInfo.Pod.Name, pInfo.Pod.Namespace, v.CPUQuota)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %f\n",
-				cgroupPodCPUQuotaName, pInfo.Pod.Name, pInfo.Pod.Namespace, v.PodCPUQuota)
-
-			// Container memory.stat
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				cgroupMemStatUsageInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, v.ContainerMemStat.RSS+v.ContainerMemStat.Cache)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				cgroupMemStatSwapInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, v.ContainerMemStat.Swap)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				cgroupMemStatRssInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, v.ContainerMemStat.RSS)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				cgroupMemStatCacheInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, v.ContainerMemStat.Cache)
-
-			// K8s stats
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				swiftMonitorK8sPodMemoryRequest, pInfo.Pod.Name, pInfo.Pod.Namespace, v.MemRequest)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				swiftMonitorK8sPodCpuRequest, pInfo.Pod.Name, pInfo.Pod.Namespace, v.CPURequest)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				swiftMonitorK8sPodMemoryLimit, pInfo.Pod.Name, pInfo.Pod.Namespace, v.MemLimit)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				swiftMonitorK8sPodCpuLimit, pInfo.Pod.Name, pInfo.Pod.Namespace, v.CPULimit)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				swiftMonitorK8sPodCpuAllocated, pInfo.Pod.Name, pInfo.Pod.Namespace, v.CPUAllocated)
-
-			out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\"} %d\n",
-				swiftMonitorK8sPodMemoryAllocated, pInfo.Pod.Name, pInfo.Pod.Namespace, v.MemAllocated)
-
-			w.Write([]byte(out))
+			pInfo := loadVal.(*PodInfo)
+			out := c.parseResponse(pInfo, v)
+			w.Write(out)
+		} else {
+			loadVal, ok := c.manager.GetExternalPodMap().Load(k)
+			if ok {
+				pInfo := loadVal.(*PodInfo)
+				out := c.parseResponse(pInfo, v)
+				w.Write(out)
+			}
 		}
 	}
 }

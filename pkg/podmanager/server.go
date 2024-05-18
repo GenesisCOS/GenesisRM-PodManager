@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,50 +28,25 @@ import (
 	"k8s.io/klog/v2"
 
 	cgroup "swiftkube.io/swiftkube/pkg/cgroup"
+	"swiftkube.io/swiftkube/pkg/podmanager/types"
 	"swiftkube.io/swiftkube/pkg/signals"
 )
 
-type PodState = string
-type CPUState = string
-type MemoryState = string
-type EndpointState = string
-
-const (
-	CPU_UNKNOWN                    CPUState = "unknown"
-	CPU_DYNAMIC_OVERPROVISION      CPUState = "dynamic-overprovision"
-	CPU_DYNAMIC_RESOURCE_EFFICIENT CPUState = "dynamic-resource-efficient"
-	CPU_MAX                        CPUState = "cpu-max"
-
-	MEMORY_UNKNOWN MemoryState = "unknown"
-	MEMORY_SWAPPED MemoryState = "mem-swapped"
-	MEMORY_MAX     MemoryState = "mem-max"
-
-	POD_READY_FULLSPEED PodState = "Ready-FullSpeed"
-	POD_READY_RUNNING   PodState = "Ready-Running"
-	POD_READY_CATNAP    PodState = "Ready-CatNap"
-	POD_READY_LONGNAP   PodState = "Ready-LongNap"
-	POD_INITIALIZING    PodState = "Initializing"
-	POD_WARMINGUP       PodState = "WarmingUp"
-
-	ENDPOINT_UP   EndpointState = "Up"
-	ENDPOINT_DOWN EndpointState = "Down"
-)
-
 type ContainerInfo struct {
-	name string
+	Name string
 
-	cg *cgroup.Cgroup
+	Cgroup *cgroup.Cgroup
 }
 
 type PodInfo struct {
 	Pod *corev1.Pod
 
-	cg *cgroup.Cgroup
+	Cgroup *cgroup.Cgroup
 
-	cpuState    CPUState
-	memoryState MemoryState
+	CPUState    types.CPUState
+	MemoryState types.MemoryState
 
-	containerInfos []*ContainerInfo
+	ContainerInfos []*ContainerInfo
 }
 
 type MetricDataPoint struct {
@@ -94,13 +71,13 @@ type MetricDataPoint struct {
 }
 
 type PodManager struct {
-	nodeName string
+	NodeName string
 
 	client *kubernetes.Clientset
 
-	podInformer coreinformers.PodInformer
-	podLister   corelisters.PodLister
-	podSynced   cache.InformerSynced
+	PodInformer coreinformers.PodInformer
+	PodLister   corelisters.PodLister
+	PodSynced   cache.InformerSynced
 
 	// workqueue is a rate limited work queue. This is used to queue work to be
 	// processed instead of performing it as soon as a change happens. This
@@ -109,11 +86,16 @@ type PodManager struct {
 	// simultaneously in two different workers.
 	workqueue workqueue.RateLimitingInterface
 
-	podMap sync.Map
+	PodMap         sync.Map
+	ExternalPodMap sync.Map
 }
 
 func (pm *PodManager) GetPodMap() *sync.Map {
-	return &(pm.podMap)
+	return &(pm.PodMap)
+}
+
+func (pm *PodManager) GetExternalPodMap() *sync.Map {
+	return &(pm.ExternalPodMap)
 }
 
 func (c *PodManager) enqueuePod(obj interface{}) {
@@ -184,11 +166,27 @@ func (c *PodManager) processNextWorkItem(ctx context.Context) bool {
 }
 
 func (manager *PodManager) GetPodInfo(key string) *PodInfo {
-	v, ok := manager.podMap.Load(key)
+	v, ok := manager.PodMap.Load(key)
 	if !ok {
 		return nil
 	}
 	return v.(*PodInfo)
+}
+
+const defaultIPVSWeight int64 = 100
+
+func editIPVSWeight(realServer string, weight int64) error {
+	tcpService := ""
+
+	cmd := exec.Command(
+		"ipvsadm", "-e",
+		"--real-server", realServer,
+		"--tcp-service", tcpService,
+		"--weight", strconv.FormatInt(weight, 10),
+		"----masquerading",
+	)
+
+	return cmd.Run()
 }
 
 func (c *PodManager) syncHandler(ctx context.Context, key string) error {
@@ -201,13 +199,14 @@ func (c *PodManager) syncHandler(ctx context.Context, key string) error {
 	}
 
 	// Get the Pod resource with this namespace/name
-	pod, err := c.podLister.Pods(namespace).Get(name)
+	pod, err := c.PodLister.Pods(namespace).Get(name)
 	if err != nil {
-		// The Pod resource may no longer exist, in which case we stop
-		// processing.
+		// The Pod resource may no longer exist,
+		// in which case we stop processing.
 		if errors.IsNotFound(err) {
 			utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-			c.podMap.Delete(key)
+			c.PodMap.Delete(key)
+			c.ExternalPodMap.Delete(key)
 			return nil
 		}
 		return err
@@ -215,27 +214,40 @@ func (c *PodManager) syncHandler(ctx context.Context, key string) error {
 
 	pod = pod.DeepCopy()
 
-	if pod.Spec.NodeName != c.nodeName {
-		c.podMap.Delete(key)
+	// ipvsadm -e --real-server 172.30.4.97:18856 --tcp-service 10.4.233.75:18856 -w 500 -m
+	// set ipvs weight
+	/*
+		weightStr, ok := pod.GetLabels()["swiftkube.io/ipvs-weight"]
+		if ok {
+			weight, err := strconv.ParseInt(weightStr, 10, 64)
+			podIP := pod.Status.PodIP
+			containerPort := pod.Spec.Containers[0].Ports[0].ContainerPort
+
+			if err != nil {
+				klog.ErrorS(err, "parse int failed")
+				weight = defaultIPVSWeight
+			}
+
+		}
+	*/
+
+	if pod.Spec.NodeName != c.NodeName {
+		c.PodMap.Delete(key)
+		c.ExternalPodMap.Delete(key)
+		return nil
+	}
+
+	if pod.Status.Phase != corev1.PodRunning {
+		c.PodMap.Delete(key)
+		c.ExternalPodMap.Delete(key)
 		return nil
 	}
 
 	podCg, err := cgroup.NewPodCg(pod)
 	if err != nil {
-		klog.ErrorS(err, "Fail to get pod cgroup")
-		c.podMap.Delete(key)
-		return nil
-	}
-
-	state, ok := pod.GetLabels()["swiftkube.io/state"]
-	if !ok {
-		c.podMap.Delete(key)
-		return nil
-	}
-
-	endpoint, ok := pod.GetLabels()["swiftkube.io/endpoint"]
-	if !ok {
-		c.podMap.Delete(key)
+		klog.ErrorS(err, "failed to get pod cgroup")
+		c.PodMap.Delete(key)
+		c.ExternalPodMap.Delete(key)
 		return nil
 	}
 
@@ -244,256 +256,287 @@ func (c *PodManager) syncHandler(ctx context.Context, key string) error {
 
 		cg, err := cgroup.NewContainerCg(pod, &containerStatus)
 		if err != nil {
-			klog.ErrorS(err, "Fail to get container cgroup")
-			c.podMap.Delete(key)
+			klog.ErrorS(err, "fail to get container cgroup")
+			c.PodMap.Delete(key)
+			c.ExternalPodMap.Delete(key)
 			return nil
 		}
 
 		containerInfos = append(containerInfos, &ContainerInfo{
-			name: containerStatus.Name,
-			cg:   cg,
+			Name:   containerStatus.Name,
+			Cgroup: cg,
 		})
 	}
 
-	// (state == WarmingUp or Ready-FullSpeed) and endpoint == Down
-	if (state == string(POD_WARMINGUP) || state == string(POD_READY_FULLSPEED)) && endpoint == string(ENDPOINT_DOWN) {
-		for {
-			t := time.NewTimer(500 * time.Millisecond)
-			// TODO
-			//if c.GetPodInfo(key).cpuState == CPU_MAX && c.GetPodInfo(key).memoryState == MEMORY_MAX {
-			if c.GetPodInfo(key).cpuState == CPU_MAX {
-				break
-			}
-			<-t.C
-		}
+	state, stateOk := pod.GetLabels()["swiftkube.io/state"]
+	endpoint, endpointOk := pod.GetLabels()["swiftkube.io/endpoint"]
 
-		pod.GetLabels()["swiftkube.io/endpoint"] = string(ENDPOINT_UP)
-		for {
-			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
-			if err == nil {
-				break
-			} else {
-				klog.ErrorS(err, "Fail to update pod. retry ...")
-				pod, err = c.podLister.Pods(pod.Namespace).Get(pod.Name)
-				if errors.IsNotFound(err) {
-					utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-					c.podMap.Delete(key)
-					return nil
+	if stateOk && endpointOk {
+		// (state == WarmingUp or Ready-FullSpeed) and endpoint == Down
+		if (state == string(types.WU) || state == string(types.RFS)) && endpoint == string(types.ENDPOINT_DOWN) {
+			for {
+				t := time.NewTimer(500 * time.Millisecond)
+				// TODO
+				//if c.GetPodInfo(key).cpuState == CPU_MAX && c.GetPodInfo(key).memoryState == MEMORY_MAX {
+				if c.GetPodInfo(key).CPUState == types.CPU_MAX {
+					break
 				}
-				pod = pod.DeepCopy()
-				pod.GetLabels()["swiftkube.io/endpoint"] = string(ENDPOINT_UP)
+				<-t.C
 			}
-		}
-	}
 
-	// state == Ready-Running and endpoint == Down
-	if state == string(POD_READY_RUNNING) && endpoint == string(ENDPOINT_DOWN) {
-		for {
-			t := time.NewTimer(500 * time.Millisecond)
-			//if c.GetPodInfo(key).cpuState == CPU_DYNAMIC_OVERPROVISION && c.GetPodInfo(key).memoryState == MEMORY_MAX {
-			if c.GetPodInfo(key).cpuState == CPU_DYNAMIC_OVERPROVISION {
-				break
-			}
-			<-t.C
-		}
-
-		pod.GetLabels()["swiftkube.io/endpoint"] = string(ENDPOINT_UP)
-		for {
-			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
-			if err == nil {
-				break
-			} else {
-				klog.ErrorS(err, "Fail to update pod. retry ...")
-				pod, err = c.podLister.Pods(pod.Namespace).Get(pod.Name)
-				if errors.IsNotFound(err) {
-					utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-					c.podMap.Delete(key)
-					return nil
+			pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+			for {
+				_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
+				if err == nil {
+					break
+				} else {
+					klog.ErrorS(err, "Fail to update pod. retry ...")
+					pod, err = c.PodLister.Pods(pod.Namespace).Get(pod.Name)
+					if errors.IsNotFound(err) {
+						utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
+						c.PodMap.Delete(key)
+						return nil
+					}
+					pod = pod.DeepCopy()
+					pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
 				}
-				pod = pod.DeepCopy()
-				pod.GetLabels()["swiftkube.io/endpoint"] = string(ENDPOINT_UP)
 			}
 		}
-	}
 
-	// (state == Ready-CatNap or Ready-LongNap) and endpoint == Up
-	if (state == string(POD_READY_CATNAP) || state == string(POD_READY_LONGNAP)) && endpoint == string(ENDPOINT_UP) {
-		pod.GetLabels()["swiftkube.io/endpoint"] = string(ENDPOINT_DOWN)
-		for {
-			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
-			if err == nil {
-				break
-			} else {
-				klog.ErrorS(err, "Fail to update pod. retry ...")
-				pod, err = c.podLister.Pods(pod.Namespace).Get(pod.Name)
-				if errors.IsNotFound(err) {
-					utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-					c.podMap.Delete(key)
-					return nil
+		// state == Ready-Running and endpoint == Down
+		if state == string(types.RR) && endpoint == string(types.ENDPOINT_DOWN) {
+			for {
+				t := time.NewTimer(500 * time.Millisecond)
+				//if c.GetPodInfo(key).cpuState == CPU_DYNAMIC_OVERPROVISION && c.GetPodInfo(key).memoryState == MEMORY_MAX {
+				if c.GetPodInfo(key).CPUState == types.CPU_DYNAMIC_OVERPROVISION {
+					break
 				}
-				pod = pod.DeepCopy()
-				pod.GetLabels()["swiftkube.io/endpoint"] = string(ENDPOINT_UP)
+				<-t.C
+			}
+
+			pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+			for {
+				_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
+				if err == nil {
+					break
+				} else {
+					klog.ErrorS(err, "Fail to update pod. retry ...")
+					pod, err = c.PodLister.Pods(pod.Namespace).Get(pod.Name)
+					if errors.IsNotFound(err) {
+						utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
+						c.PodMap.Delete(key)
+						return nil
+					}
+					pod = pod.DeepCopy()
+					pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+				}
+			}
+		}
+
+		// (state == Ready-CatNap or Ready-LongNap) and endpoint == Up
+		if (state == string(types.RCN) || state == string(types.RLN)) && endpoint == string(types.ENDPOINT_UP) {
+			pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_DOWN)
+			for {
+				_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
+				if err == nil {
+					break
+				} else {
+					klog.ErrorS(err, "Fail to update pod. retry ...")
+					pod, err = c.PodLister.Pods(pod.Namespace).Get(pod.Name)
+					if errors.IsNotFound(err) {
+						utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
+						c.PodMap.Delete(key)
+						return nil
+					}
+					pod = pod.DeepCopy()
+					pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+				}
 			}
 		}
 	}
 
-	pod, err = c.podLister.Pods(pod.Namespace).Get(pod.Name)
-	if errors.IsNotFound(err) {
-		utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-		c.podMap.Delete(key)
-		return nil
+	if stateOk && endpointOk {
+		klog.InfoS("load pod", "pod key", key)
+		c.PodMap.Swap(key, &PodInfo{
+			Pod: pod.DeepCopy(),
+
+			Cgroup: podCg,
+
+			CPUState:    types.CPU_UNKNOWN,
+			MemoryState: types.MEMORY_UNKNOWN,
+
+			ContainerInfos: containerInfos,
+		})
+	} else {
+		klog.InfoS("load external pod", "pod key", key)
+		c.ExternalPodMap.Swap(key, &PodInfo{
+			Pod: pod.DeepCopy(),
+
+			Cgroup: podCg,
+
+			CPUState:    types.CPU_UNKNOWN,
+			MemoryState: types.MEMORY_UNKNOWN,
+
+			ContainerInfos: containerInfos,
+		})
 	}
-
-	c.podMap.Swap(key, &PodInfo{
-		Pod: pod.DeepCopy(),
-
-		cg: podCg,
-
-		cpuState:    CPU_UNKNOWN,
-		memoryState: MEMORY_UNKNOWN,
-
-		containerInfos: containerInfos,
-	})
 
 	return nil
+}
+
+func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*MetricDataPoint, error) {
+	// cpuacct.usage
+	cpuacctUsage, err := pInfo.Cgroup.GetCPUAcctUsage()
+	if err != nil {
+		klog.ErrorS(err, "read cpuacct.usage failed.")
+		return nil, err
+	}
+
+	// memory.usage_in_bytes
+	podMemUsageInBytes, err := pInfo.Cgroup.GetMemoryUsageInBytes()
+	if err != nil {
+		klog.ErrorS(err, "read memory.usage_in_bytes failed.")
+		return nil, err
+	}
+
+	podMemStat, err := pInfo.Cgroup.GetMemoryStat()
+	if err != nil {
+		klog.ErrorS(err, "read memory.stat failed.")
+		return nil, err
+	}
+
+	var podCPUQuota float64 = -1.0
+
+	// cpu.cfs_quota_us
+	podCFSQuota, err := pInfo.Cgroup.GetCFSQuota()
+	if err != nil {
+		klog.ErrorS(err, "read cpu.cfs_quota_us failed.")
+		return nil, err
+	}
+
+	if podCFSQuota != -1 {
+		// cpu.cfs_period_us
+		podCFSPeriod, err := pInfo.Cgroup.GetCFSPeriod()
+		if err != nil {
+			klog.ErrorS(err, "read cpu.cfs_period_us failed.")
+			return nil, err
+		}
+
+		podCPUQuota = float64(podCFSQuota) / float64(podCFSPeriod)
+	}
+
+	var containerCPUQuota float64 = 0.0
+	var containerMemLimitInBytes int64 = 0
+	var containerMemStat *cgroup.CgMemoryStat = nil
+
+	// Container metrics
+	for _, containerInfo := range pInfo.ContainerInfos {
+		// cpu.cfs_quota_us
+		cfsQuotaUs, err := containerInfo.Cgroup.GetCFSQuota()
+		if err != nil {
+			klog.ErrorS(err, "read container cpu.cfs_quota_us failed.")
+			return nil, err
+		}
+
+		if cfsQuotaUs != -1 {
+			// cpu.cfs_period_us
+			cfsPeriodUs, err := containerInfo.Cgroup.GetCFSPeriod()
+			if err != nil {
+				klog.ErrorS(err, "read container cpu.cfs_period_us failed.")
+				return nil, err
+			}
+
+			containerCPUQuota += float64(cfsQuotaUs) / float64(cfsPeriodUs)
+		}
+
+		// memory.limit_in_bytes
+		perContainerMemLimitInBytes, err := containerInfo.Cgroup.GetMemoryLimitInBytes()
+		if err != nil {
+			klog.ErrorS(err, "read container memory.limit_in_bytes failed.")
+			return nil, err
+		}
+
+		// if not memory limit < 0 or memory limit > 512 GiB
+		if perContainerMemLimitInBytes > 0 && perContainerMemLimitInBytes < 549755813888 {
+			containerMemLimitInBytes += perContainerMemLimitInBytes
+		}
+
+		perContainerMemStat, err := containerInfo.Cgroup.GetMemoryStat()
+		if err != nil {
+			klog.ErrorS(err, "read container memory.stat failed.")
+			return nil, err
+		}
+
+		if containerMemStat == nil {
+			containerMemStat = perContainerMemStat
+		} else {
+			containerMemStat.Add(perContainerMemStat)
+		}
+	}
+
+	var memRequest int64 = 0
+	var cpuRequest int64 = 0
+	var memLimit int64 = 0
+	var cpuLimit int64 = 0
+
+	for _, container := range pInfo.Pod.Spec.Containers {
+		memRequest += container.Resources.Requests.Memory().Value()
+		cpuRequest += container.Resources.Requests.Cpu().MilliValue()
+		memLimit += container.Resources.Limits.Memory().Value()
+		cpuLimit += container.Resources.Limits.Cpu().MilliValue()
+	}
+
+	var memAllocated int64 = 0
+	var cpuAllocated int64 = 0
+
+	for _, containerStatus := range pInfo.Pod.Status.ContainerStatuses {
+		cpuAllocated += containerStatus.AllocatedResources.Cpu().MilliValue()
+		memAllocated += containerStatus.AllocatedResources.Memory().Value()
+	}
+
+	timestamp := time.Now()
+
+	return &MetricDataPoint{
+		CPUUsage:    cpuacctUsage,
+		CPUQuota:    containerCPUQuota,
+		PodCPUQuota: podCPUQuota,
+
+		MemUsageInBytes:  podMemUsageInBytes,
+		MemLimitInBytes:  containerMemLimitInBytes,
+		PodMemStat:       podMemStat,
+		ContainerMemStat: containerMemStat,
+
+		MemRequest:   memRequest,
+		CPURequest:   cpuRequest,
+		MemLimit:     memLimit,
+		CPULimit:     cpuLimit,
+		MemAllocated: memAllocated,
+		CPUAllocated: cpuAllocated,
+
+		timestamp: timestamp,
+	}, nil
 }
 
 func (c *PodManager) CollectMetrics() map[string]*MetricDataPoint {
 	retval := make(map[string]*MetricDataPoint)
 
-	c.podMap.Range(func(podKey, info interface{}) bool {
+	c.PodMap.Range(func(podKey, info interface{}) bool {
 		pInfo := info.(*PodInfo)
-
-		// cpuacct.usage
-		cpuacctUsage, err := pInfo.cg.GetCPUAcctUsage()
+		p, err := c.collectPodMetrics(pInfo)
 		if err != nil {
-			klog.ErrorS(err, "read cpuacct.usage failed.")
 			return true
 		}
+		retval[podKey.(string)] = p
+		return true
+	})
 
-		// memory.usage_in_bytes
-		podMemUsageInBytes, err := pInfo.cg.GetMemoryUsageInBytes()
+	c.ExternalPodMap.Range(func(podKey, info interface{}) bool {
+		pInfo := info.(*PodInfo)
+		p, err := c.collectPodMetrics(pInfo)
 		if err != nil {
-			klog.ErrorS(err, "read memory.usage_in_bytes failed.")
 			return true
 		}
-
-		podMemStat, err := pInfo.cg.GetMemoryStat()
-		if err != nil {
-			klog.ErrorS(err, "read memory.stat failed.")
-			return true
-		}
-
-		var podCPUQuota float64 = -1.0
-
-		// cpu.cfs_quota_us
-		podCFSQuota, err := pInfo.cg.GetCFSQuota()
-		if err != nil {
-			klog.ErrorS(err, "read cpu.cfs_quota_us failed.")
-			return true
-		}
-
-		if podCFSQuota != -1 {
-			// cpu.cfs_period_us
-			podCFSPeriod, err := pInfo.cg.GetCFSPeriod()
-			if err != nil {
-				klog.ErrorS(err, "read cpu.cfs_period_us failed.")
-				return true
-			}
-
-			podCPUQuota = float64(podCFSQuota) / float64(podCFSPeriod)
-		}
-
-		var containerCPUQuota float64 = 0.0
-		var containerMemLimitInBytes int64 = 0
-		var containerMemStat *cgroup.CgMemoryStat = nil
-
-		// Container metrics
-		for _, containerInfo := range pInfo.containerInfos {
-			// cpu.cfs_quota_us
-			cfsQuotaUs, err := containerInfo.cg.GetCFSQuota()
-			if err != nil {
-				klog.ErrorS(err, "read container cpu.cfs_quota_us failed.")
-				return true
-			}
-
-			if cfsQuotaUs != -1 {
-				// cpu.cfs_period_us
-				cfsPeriodUs, err := containerInfo.cg.GetCFSQuota()
-				if err != nil {
-					klog.ErrorS(err, "read container cpu.cfs_period_us failed.")
-					return true
-				}
-
-				containerCPUQuota += float64(cfsQuotaUs) / float64(cfsPeriodUs)
-			}
-
-			// memory.limit_in_bytes
-			perContainerMemLimitInBytes, err := containerInfo.cg.GetMemoryLimitInBytes()
-			if err != nil {
-				klog.ErrorS(err, "read container memory.limit_in_bytes failed.")
-				return true
-			}
-
-			// if not memory limit < 0 or memory limit > 512 GiB
-			if perContainerMemLimitInBytes > 0 && perContainerMemLimitInBytes < 549755813888 {
-				containerMemLimitInBytes += perContainerMemLimitInBytes
-			}
-
-			perContainerMemStat, err := containerInfo.cg.GetMemoryStat()
-			if err != nil {
-				klog.ErrorS(err, "Fail to read memory.stat")
-				return true
-			}
-
-			if containerMemStat == nil {
-				containerMemStat = perContainerMemStat
-			} else {
-				containerMemStat.Add(perContainerMemStat)
-			}
-		}
-
-		var memRequest int64 = 0
-		var cpuRequest int64 = 0
-		var memLimit int64 = 0
-		var cpuLimit int64 = 0
-
-		for _, container := range pInfo.Pod.Spec.Containers {
-			memRequest += container.Resources.Requests.Memory().Value()
-			cpuRequest += container.Resources.Requests.Cpu().MilliValue()
-			memLimit += container.Resources.Limits.Memory().Value()
-			cpuLimit += container.Resources.Limits.Cpu().MilliValue()
-		}
-
-		var memAllocated int64 = 0
-		var cpuAllocated int64 = 0
-
-		for _, containerStatus := range pInfo.Pod.Status.ContainerStatuses {
-			cpuAllocated += containerStatus.AllocatedResources.Cpu().MilliValue()
-			memAllocated += containerStatus.AllocatedResources.Memory().Value()
-		}
-
-		timestamp := time.Now()
-
-		retval[podKey.(string)] = &MetricDataPoint{
-			CPUUsage:    cpuacctUsage,
-			CPUQuota:    containerCPUQuota,
-			PodCPUQuota: podCPUQuota,
-
-			MemUsageInBytes:  podMemUsageInBytes,
-			MemLimitInBytes:  containerMemLimitInBytes,
-			PodMemStat:       podMemStat,
-			ContainerMemStat: containerMemStat,
-
-			MemRequest:   memRequest,
-			CPURequest:   cpuRequest,
-			MemLimit:     memLimit,
-			CPULimit:     cpuLimit,
-			MemAllocated: memAllocated,
-			CPUAllocated: cpuAllocated,
-
-			timestamp: timestamp,
-		}
+		retval[podKey.(string)] = p
 		return true
 	})
 
@@ -538,18 +581,18 @@ func NewPodManagerCommand() *cobra.Command {
 			podInformer := kubeInformerFactory.Core().V1().Pods()
 
 			podManager := &PodManager{
-				nodeName: hostname,
+				NodeName: hostname,
 
 				client: kubeClient,
 
-				podInformer: podInformer,
-				podLister:   podInformer.Lister(),
-				podSynced:   podInformer.Informer().HasSynced,
+				PodInformer: podInformer,
+				PodLister:   podInformer.Lister(),
+				PodSynced:   podInformer.Informer().HasSynced,
 
 				workqueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "PodManager"),
 			}
 
-			podManager.podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			podManager.PodInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 				AddFunc: podManager.enqueuePod,
 				UpdateFunc: func(old, new interface{}) {
 					oldP := old.(*corev1.Pod)
@@ -582,7 +625,7 @@ func (m *PodManager) Run(ctx context.Context) error {
 
 	logger.Info("Waiting for informer caches to sync")
 
-	if ok := cache.WaitForCacheSync(ctx.Done(), m.podSynced); !ok {
+	if ok := cache.WaitForCacheSync(ctx.Done(), m.PodSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
@@ -591,10 +634,7 @@ func (m *PodManager) Run(ctx context.Context) error {
 		go wait.UntilWithContext(ctx, m.runWorker, time.Second)
 	}
 
-	cpuScaler := CPUScaler{
-		manager: m,
-		podMap:  make(map[string]*PerPodCPUScalerData),
-	}
+	cpuScaler := NewCPUScaler(m)
 
 	logger.Info("Start CPU scaler")
 	go cpuScaler.Start(context.TODO())
