@@ -48,6 +48,10 @@ func (manager *ApplicationManager) Run(ctx context.Context) error {
 		manager: manager,
 	})
 
+	mux.Handle("/stat", &statHandler{
+		appmanager: manager,
+	})
+
 	server.Handler = mux
 	go server.ListenAndServe()
 
@@ -143,6 +147,7 @@ func NewApplicationManagerCommand() *cobra.Command {
 			//skInformerFactory := skinformers.NewSharedInformerFactory(skClient, time.Second*30)
 
 			podInformer := kubeInformerFactory.Core().V1().Pods()
+			// depInformer := kubeInformerFactory.Apps().V1().Deployments()
 
 			appManager := &ApplicationManager{
 				podInformer: podInformer,

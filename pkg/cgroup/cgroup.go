@@ -25,12 +25,21 @@ const (
 	memoryUsageInBytesFile = "memory.usage_in_bytes"
 	memoryLimitInBytesFile = "memory.limit_in_bytes"
 	memoryStatFile         = "memory.stat"
+	cpuStatFile            = "cpu.stat"
 	memoryHighFile         = "memory.high"
 	tasksFile              = "tasks"
 
 	cpuFamily    = "cpu"
 	memoryFamily = "memory"
 )
+
+type CgCPUStat struct {
+	NrPeriods     int64
+	NrThrottled   int64
+	NrBursts      int64
+	ThrottledTime int64
+	BurstTime     int64
+}
 
 type CgMemoryStat struct {
 	Cache int64
@@ -45,6 +54,10 @@ func (d *CgMemoryStat) Add(other *CgMemoryStat) {
 }
 
 func getContainerID(id string) (string, error) {
+	if len(id) == 0 {
+		return "", fmt.Errorf("container ID is empty")
+	}
+
 	split := strings.Split(id, "//")
 	if len(split) == 2 {
 		return split[1], nil
@@ -57,7 +70,7 @@ func checkCgFile(path string) error {
 	_, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// LOG
+			return fmt.Errorf("file %s not exists", path)
 		}
 	}
 	return err
@@ -114,6 +127,10 @@ func getPodMemoryStatFilePath(podUid types.UID, qosClass corev1.PodQOSClass) (st
 	return getPodCgFilePath(podUid, qosClass, memoryFamily, memoryStatFile)
 }
 
+func getPodCPUStatFilePath(podUid types.UID, qosClass corev1.PodQOSClass) (string, error) {
+	return getPodCgFilePath(podUid, qosClass, memoryFamily, cpuStatFile)
+}
+
 func getPodMemoryUsageInBytesFilePath(podUid types.UID, qosClass corev1.PodQOSClass) (string, error) {
 	return getPodCgFilePath(podUid, qosClass, memoryFamily, memoryUsageInBytesFile)
 }
@@ -144,6 +161,10 @@ func getContainerMemoryLimitInBytesFilePath(podUid types.UID, qosClass corev1.Po
 
 func getContainerMemoryStatFilePath(podUid types.UID, qosClass corev1.PodQOSClass, containerId string) (string, error) {
 	return getContainerCgFilePath(podUid, qosClass, memoryFamily, containerId, memoryStatFile)
+}
+
+func getContainerCPUStatFilePath(podUid types.UID, qosClass corev1.PodQOSClass, containerId string) (string, error) {
+	return getContainerCgFilePath(podUid, qosClass, cpuFamily, containerId, cpuStatFile)
 }
 
 func getContainerCpuacctUsageFilePath(podUid types.UID, qosClass corev1.PodQOSClass, containerId string) (string, error) {
@@ -197,6 +218,67 @@ func cgReadMemoryStat(filePath string) (*CgMemoryStat, error) {
 	}, nil
 }
 
+func cgReadCPUStat(filePath string) (*CgCPUStat, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var nrPeriods int64
+	var nrThrottled int64
+	var nrBursts int64
+	var throttledTime int64
+	var burstTime int64
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+
+		line = strings.Trim(line, "\n")
+		words := strings.Fields(line)
+		if len(words) != 2 {
+			continue
+		}
+
+		item := words[0]
+		value := words[1]
+
+		if item == "nr_periods" {
+			nrPeriods, err = strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				klog.ErrorS(err, "parse int64 failed.", "memory.stat", "rss")
+			}
+		} else if item == "nr_throttled" {
+			nrThrottled, err = strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				klog.ErrorS(err, "parse int64 failed.", "memory.stat", "cache")
+			}
+		} else if item == "nr_bursts" {
+			nrBursts, err = strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				klog.ErrorS(err, "parse int64 failed.", "memory.stat", "swap")
+			}
+		} else if item == "throttled_time" {
+			throttledTime, err = strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				klog.ErrorS(err, "parse int64 failed.", "memory.stat", "swap")
+			}
+		} else if item == "burst_time" {
+			burstTime, err = strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				klog.ErrorS(err, "parse int64 failed.", "memory.stat", "swap")
+			}
+		}
+	}
+
+	return &CgCPUStat{
+		NrPeriods:     nrPeriods,
+		NrThrottled:   nrThrottled,
+		NrBursts:      nrBursts,
+		ThrottledTime: throttledTime,
+		BurstTime:     burstTime,
+	}, nil
+}
+
 func cgReadInt64(file string) (int64, error) {
 	data, err := os.ReadFile(file)
 	if err != nil {
@@ -225,6 +307,7 @@ func cgWriteString(file string, value string) error {
 
 type Cgroup struct {
 	cpuacctUsageFilePath string
+	cpuStatFilePath      string
 	cfsPeriodUsFilePath  string
 	cfsQuotaUsFilePath   string
 
@@ -260,6 +343,10 @@ func (cg *Cgroup) GetMemoryLimitInBytes() (int64, error) {
 
 func (cg *Cgroup) GetMemoryStat() (*CgMemoryStat, error) {
 	return cgReadMemoryStat(cg.memoryStatFilePath)
+}
+
+func (cg *Cgroup) GetCPUStat() (*CgCPUStat, error) {
+	return cgReadCPUStat(cg.cpuStatFilePath)
 }
 
 func NewContainerCg(pod *corev1.Pod, con *corev1.ContainerStatus) (*Cgroup, error) {
@@ -303,8 +390,15 @@ func NewContainerCg(pod *corev1.Pod, con *corev1.ContainerStatus) (*Cgroup, erro
 		return nil, err
 	}
 
+	// container cpu.stat
+	cpuStatFilePath, err := getContainerCPUStatFilePath(pod.GetUID(), pod.Status.QOSClass, containerId)
+	if err != nil {
+		return nil, err
+	}
+
 	cg := &Cgroup{
 		cpuacctUsageFilePath: cpuacctUsageFilePath,
+		cpuStatFilePath:      cpuStatFilePath,
 		cfsPeriodUsFilePath:  cpuCfsPeriodFilePath,
 		cfsQuotaUsFilePath:   cpuCfsQuotaFilePath,
 
@@ -354,8 +448,15 @@ func NewPodCg(pod *corev1.Pod) (*Cgroup, error) {
 		return nil, err
 	}
 
+	// cpu.stat
+	podCPUStatFilePath, err := getPodCPUStatFilePath(pod.GetUID(), pod.Status.QOSClass)
+	if err != nil {
+		return nil, err
+	}
+
 	cg := &Cgroup{
 		cpuacctUsageFilePath: podCPUacctUsageFilePath,
+		cpuStatFilePath:      podCPUStatFilePath,
 		cfsPeriodUsFilePath:  podCPUCfsPeriodFilePath,
 		cfsQuotaUsFilePath:   podCPUCfsQuotaFilePath,
 

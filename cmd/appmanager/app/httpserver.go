@@ -2,12 +2,14 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/klog/v2"
 )
 
 type listerResponse struct {
@@ -87,4 +89,55 @@ func (c *listerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp.Pods = pods
 	b, _ := json.Marshal(resp)
 	w.Write(b)
+}
+
+type statHandler struct {
+	appmanager *ApplicationManager
+}
+
+func (c *statHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	selector := labels.NewSelector()
+	requirement, err := labels.NewRequirement("swiftkube.io/state", selection.Equals, []string{"Ready-Running"})
+	if err != nil {
+		return
+	}
+	selector = selector.Add(*requirement)
+
+	podMap := make(map[string]map[string]int64)
+
+	rr_pods, err := c.appmanager.podLister.List(selector)
+	if err != nil {
+		klog.ErrorS(err, "list pods error")
+		return
+	}
+	for _, pod := range rr_pods {
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		namespace := pod.Namespace
+		service, ok := pod.GetLabels()["swiftkube.io/service"]
+		if !ok {
+			continue
+		}
+		_, ok = podMap[namespace]
+		if !ok {
+			podMap[namespace] = make(map[string]int64)
+		}
+		_, ok = podMap[namespace][service]
+		if !ok {
+			podMap[namespace][service] = 0
+		}
+		podMap[namespace][service] += 1
+	}
+
+	out := ""
+
+	for namespace, services := range podMap {
+		for service, nr_rr_pod := range services {
+			out += fmt.Sprintf("genesis_rr_pods_number{service=\"%s\", namespace=\"%s\"} %d\n",
+				service, namespace, nr_rr_pod)
+		}
+	}
+
+	w.Write([]byte(out))
 }

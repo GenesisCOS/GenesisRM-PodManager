@@ -63,23 +63,28 @@ push_podmanager:
 	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
 
 setup_podmanager:
-	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager > /var/log/podmanager.log 2>&1'"
+	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager'"
 
 resetup_podmanager: build_podmanager 
 	-ansible myhosts -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
 	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
 	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
-	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager > /var/log/podmanager.log 2>&1'"
+	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager'"
 
 stop_podmanager:
 	ansible myhosts -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
 
 setup_appmanager:
 	cp bin/appmanager /usr/local/bin/appmanager 
-	tmux new-session -s appmanager -d 'appmanager > /var/log/appmanager.log 2>&1'
+	tmux new-session -s appmanager -d 'appmanager'
 
 stop_appmanager:
 	tmux kill-session -t appmanager 
+
+resetup_appmanager: build_appmanager
+	- tmux kill-session -t appmanager 
+	cp bin/appmanager /usr/local/bin/appmanager 
+	tmux new-session -s appmanager -d 'appmanager'
 
 .PHONY: clean 
 clean:
