@@ -200,16 +200,16 @@ func editIPVSWeight(realServerIP string, realServerPort uint16, weight int64) er
 		}
 	}
 
-	/*
-		cmd := exec.Command(
-			"ipvsadm", "-e",
-			"--real-server", fmt.Sprintf("%s:%d", realServerIP, realServerPort),
-			"--tcp-service", fmt.Sprintf("%s:%d", service.Address.String(), service.Port),
-			"--weight", strconv.FormatInt(weight, 10),
-			"----masquerading",
-		)
+	/* 以下是命令行的方式修改权重。目前使用moby的ipvs包，就无需调用ipvsadm了。
+	cmd := exec.Command(
+		"ipvsadm", "-e",
+		"--real-server", fmt.Sprintf("%s:%d", realServerIP, realServerPort),
+		"--tcp-service", fmt.Sprintf("%s:%d", service.Address.String(), service.Port),
+		"--weight", strconv.FormatInt(weight, 10),
+		"----masquerading",
+	)
 
-		return cmd.Run()
+	return cmd.Run()
 	*/
 
 	return fmt.Errorf("not found real server")
@@ -240,8 +240,8 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 
 	pod = pod.DeepCopy()
 
-	// ipvsadm -e --real-server 172.30.4.97:18856 --tcp-service 10.4.233.75:18856 -w 500 -m
-	// set ipvs weight
+	// 示例命令行：ipvsadm -e --real-server 172.30.4.97:18856 --tcp-service 10.4.233.75:18856 -w 500 -m
+	// 设置 ipvs 的权重
 	weightStr, ok := pod.GetLabels()["swiftkube.io/ipvs-weight"]
 	if ok {
 		weight, err := strconv.ParseInt(weightStr, 10, 64)
