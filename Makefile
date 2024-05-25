@@ -71,6 +71,11 @@ resetup_podmanager: build_podmanager
 	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
 	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager'"
 
+resetup_podmanager_916: build_podmanager 
+	-ansible kunpeng-916 -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
+	ansible kunpeng-916 -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
+	ansible kunpeng-916 -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager && tmux new-session -s podmanager -d 'podmanager'"
+
 stop_podmanager:
 	ansible myhosts -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
 

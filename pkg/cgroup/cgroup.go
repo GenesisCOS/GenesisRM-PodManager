@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/containerd/cgroups"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -74,6 +75,38 @@ func checkCgFile(path string) error {
 		}
 	}
 	return err
+}
+
+func loadContainerdPodCgroups(podUid types.UID, qosClass corev1.PodQOSClass) (cgroups.Cgroup, error) {
+	path := ""
+	uid := strings.ReplaceAll(string(podUid), "-", "_")
+
+	if qosClass == corev1.PodQOSBurstable {
+		path += burstablePodCgroupPath + burstablePodCgroupPathPrefix + uid + podCgroupPathSuffix
+	} else if qosClass == corev1.PodQOSBestEffort {
+		path += bestEffortPodCgroupPath + bestEffortPodCgroupPathPrefix + uid + podCgroupPathSuffix
+	} else {
+		return nil, fmt.Errorf("invalid QOS class %s", string(qosClass))
+	}
+
+	control, err := cgroups.Load(cgroups.V1, cgroups.StaticPath(path))
+	return control, err
+}
+
+func loadContainerdContainerCgroups(podUid types.UID, qosClass corev1.PodQOSClass, containerId string) (cgroups.Cgroup, error) {
+	path := ""
+	uid := strings.ReplaceAll(string(podUid), "-", "_")
+
+	if qosClass == corev1.PodQOSBurstable {
+		path += burstablePodCgroupPath + burstablePodCgroupPathPrefix + uid + podCgroupPathSuffix + fmt.Sprintf("/cri-containerd-%s.scope", containerId)
+	} else if qosClass == corev1.PodQOSBestEffort {
+		path += bestEffortPodCgroupPath + bestEffortPodCgroupPathPrefix + uid + podCgroupPathSuffix + fmt.Sprintf("/cri-containerd-%s.scope", containerId)
+	} else {
+		return nil, fmt.Errorf("invalid QOS class %s", string(qosClass))
+	}
+
+	control, err := cgroups.Load(cgroups.V1, cgroups.StaticPath(path))
+	return control, err
 }
 
 func getPodCgFilePath(podUid types.UID, qosClass corev1.PodQOSClass, family string, file string) (string, error) {
@@ -291,6 +324,18 @@ func cgReadInt64(file string) (int64, error) {
 	return value, nil
 }
 
+func cgReadUInt64(file string) (uint64, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return 0, err
+	}
+	value, err := strconv.ParseUint(string(data[:len(data)-1]), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
 func cgWriteInt64(file string, value int64) error {
 	return cgWriteString(file, fmt.Sprintf("%d", value))
 }
@@ -315,14 +360,16 @@ type Cgroup struct {
 	memoryUsageInBytesFilePath string
 	memoryStatFilePath         string
 	memoryHighFilePath         string
+
+	Containerd cgroups.Cgroup
 }
 
-func (cg *Cgroup) GetCPUAcctUsage() (int64, error) {
-	return cgReadInt64(cg.cpuacctUsageFilePath)
+func (cg *Cgroup) GetCPUAcctUsage() (uint64, error) {
+	return cgReadUInt64(cg.cpuacctUsageFilePath)
 }
 
-func (cg *Cgroup) GetCFSPeriod() (int64, error) {
-	return cgReadInt64(cg.cfsPeriodUsFilePath)
+func (cg *Cgroup) GetCFSPeriod() (uint64, error) {
+	return cgReadUInt64(cg.cfsPeriodUsFilePath)
 }
 
 func (cg *Cgroup) GetCFSQuota() (int64, error) {
@@ -333,12 +380,12 @@ func (cg *Cgroup) SetCFSQuota(v int64) error {
 	return cgWriteInt64(cg.cfsQuotaUsFilePath, v)
 }
 
-func (cg *Cgroup) GetMemoryUsageInBytes() (int64, error) {
-	return cgReadInt64(cg.memoryUsageInBytesFilePath)
+func (cg *Cgroup) GetMemoryUsageInBytes() (uint64, error) {
+	return cgReadUInt64(cg.memoryUsageInBytesFilePath)
 }
 
-func (cg *Cgroup) GetMemoryLimitInBytes() (int64, error) {
-	return cgReadInt64(cg.memoryLimitInBytesFilePath)
+func (cg *Cgroup) GetMemoryLimitInBytes() (uint64, error) {
+	return cgReadUInt64(cg.memoryLimitInBytesFilePath)
 }
 
 func (cg *Cgroup) GetMemoryStat() (*CgMemoryStat, error) {
@@ -349,8 +396,12 @@ func (cg *Cgroup) GetCPUStat() (*CgCPUStat, error) {
 	return cgReadCPUStat(cg.cpuStatFilePath)
 }
 
-func NewContainerCg(pod *corev1.Pod, con *corev1.ContainerStatus) (*Cgroup, error) {
+func NewContainerCgroup(pod *corev1.Pod, con *corev1.ContainerStatus) (*Cgroup, error) {
 	containerId, err := getContainerID(con.ContainerID)
+	if err != nil {
+		return nil, err
+	}
+	containerdCgroups, err := loadContainerdContainerCgroups(pod.GetUID(), pod.Status.QOSClass, containerId)
 	if err != nil {
 		return nil, err
 	}
@@ -406,12 +457,18 @@ func NewContainerCg(pod *corev1.Pod, con *corev1.ContainerStatus) (*Cgroup, erro
 		memoryLimitInBytesFilePath: memoryLimitInBytesFilePath,
 		memoryStatFilePath:         memoryStatFilePath,
 		memoryHighFilePath:         memoryHighFilePath,
+
+		Containerd: containerdCgroups,
 	}
 
 	return cg, nil
 }
 
-func NewPodCg(pod *corev1.Pod) (*Cgroup, error) {
+func NewPodCgroup(pod *corev1.Pod) (*Cgroup, error) {
+	containerdCgroups, err := loadContainerdPodCgroups(pod.GetUID(), pod.Status.QOSClass)
+	if err != nil {
+		return nil, err
+	}
 	// cpuacct.usage
 	podCPUacctUsageFilePath, err := getPodCpuacctUsageFilePath(pod.GetUID(), pod.Status.QOSClass)
 	if err != nil {
@@ -464,6 +521,8 @@ func NewPodCg(pod *corev1.Pod) (*Cgroup, error) {
 		memoryUsageInBytesFilePath: podMemoryUsageInBytesFilePath,
 		memoryStatFilePath:         podMemoryStatFilePath,
 		memoryHighFilePath:         podMemoryHighFilePath,
+
+		Containerd: containerdCgroups,
 	}
 
 	return cg, nil

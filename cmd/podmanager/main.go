@@ -6,11 +6,11 @@ import (
 
 	"github.com/spf13/pflag"
 
-	podmanager "swiftkube.io/swiftkube/pkg/podmanager"
+	"swiftkube.io/swiftkube/cmd/podmanager/app"
 )
 
 func main() {
-	command := podmanager.NewPodManagerCommand()
+	command := app.NewPodManagerCommand()
 
 	pflag.CommandLine.AddGoFlagSet(goflag.CommandLine)
 

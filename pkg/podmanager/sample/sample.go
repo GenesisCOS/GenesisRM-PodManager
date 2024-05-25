@@ -1,17 +1,24 @@
 package sample
 
-import "math"
+import (
+	"math"
+
+	stat "gonum.org/v1/gonum/stat"
+)
 
 type Sample interface {
 	Update(v float64)
 	Max() float64
+	Stdev() float64
 	Mean() float64
 	Count() int
+	Last() float64
 }
 
 type FixLengthSample struct {
 	maxLength int
 	values    []float64
+	lastValue float64
 }
 
 func NewFixLengthSample(maxLength int) Sample {
@@ -21,9 +28,17 @@ func NewFixLengthSample(maxLength int) Sample {
 	}
 }
 
+func (s *FixLengthSample) Stdev() float64 {
+	return stat.StdDev(s.values, nil)
+}
+
+func (s *FixLengthSample) Last() float64 {
+	return s.lastValue
+}
+
 func (s *FixLengthSample) Update(v float64) {
 	s.values = append(s.values, v)
-
+	s.lastValue = v
 	if len(s.values) > s.maxLength {
 		length := len(s.values)
 		s.values = s.values[length-s.maxLength : length]

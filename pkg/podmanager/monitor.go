@@ -10,6 +10,9 @@ const (
 	cgroupCPUQuotaName     = "swiftmonitor_cgroup_cpu_quota"
 	cgroupCPUAcctUsageName = "swiftmonitor_cgroup_cpuacct_usage"
 
+	containerdPodCPUUsage  = "swiftmonitor_containerd_pod_cpu_usage"
+	containerdPodMemoryRSS = "swiftmonitor_containerd_pod_memory_rss"
+
 	cgroupMemStatUsageInBytesName = "swiftmonitor_cgroup_memory_stat_usage_in_bytes" // Read from memory.stat (cache + rss).
 	cgroupMemStatSwapInBytesName  = "swiftmonitor_cgroup_memory_stat_swap_in_bytes"
 	cgroupMemStatRssInBytesName   = "swiftmonitor_cgroup_memory_stat_rss_in_bytes"
@@ -27,7 +30,14 @@ type Monitor struct {
 	manager *PodManager
 }
 
-func (c *Monitor) parseResponse(pInfo *PodInfo, v *MetricDataPoint) []byte {
+func (c *Monitor) parseNodeMetricsResponse(metrics *NodeMetrics) []byte {
+	out := fmt.Sprintf("swiftmonitor_node_cpu_allocatable{nodename=\"%s\"} %d\n",
+		metrics.NodeName, metrics.AllocatableCPU)
+
+	return []byte(out)
+}
+
+func (c *Monitor) parsePodMetricsResponse(pInfo *PodInfo, v *PodMetrics) []byte {
 	if pInfo.Pod == nil {
 		return []byte("")
 	}
@@ -38,6 +48,7 @@ func (c *Monitor) parseResponse(pInfo *PodInfo, v *MetricDataPoint) []byte {
 	if !ok {
 		state = "None"
 	}
+
 	// cgroup CPU quotas
 	out := fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
 		cgroupCPUAcctUsageName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPUUsage)
@@ -80,25 +91,33 @@ func (c *Monitor) parseResponse(pInfo *PodInfo, v *MetricDataPoint) []byte {
 	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
 		swiftMonitorK8sPodMemoryAllocated, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.MemAllocated)
 
+	// Containerd
+	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		containerdPodCPUUsage, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerdMetrics.CPU.Usage.Total)
+
 	return []byte(out)
 }
 
 func (c *Monitor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	metrics := c.manager.CollectMetrics()
+	podMetrics := c.manager.CollectPodMetrics()
+	nodeMetrics := c.manager.CollectNodeMetrics()
 
-	for k, v := range metrics {
+	for k, metrics := range podMetrics {
 		loadVal, ok := c.manager.GetPodMap().Load(k)
 		if ok {
 			pInfo := loadVal.(*PodInfo)
-			out := c.parseResponse(pInfo, v)
+			out := c.parsePodMetricsResponse(pInfo, metrics)
 			w.Write(out)
 		} else {
-			loadVal, ok := c.manager.GetExternalPodMap().Load(k)
+			loadVal, ok := c.manager.GetUncontrolledPodMap().Load(k)
 			if ok {
 				pInfo := loadVal.(*PodInfo)
-				out := c.parseResponse(pInfo, v)
+				out := c.parsePodMetricsResponse(pInfo, metrics)
 				w.Write(out)
 			}
 		}
 	}
+
+	out := c.parseNodeMetricsResponse(nodeMetrics)
+	w.Write(out)
 }

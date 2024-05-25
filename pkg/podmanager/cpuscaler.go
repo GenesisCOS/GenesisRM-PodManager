@@ -2,13 +2,11 @@ package podmanager
 
 import (
 	"context"
-	"fmt"
 	"math"
+	"strconv"
 	"time"
 
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
+	statsv1 "github.com/containerd/cgroups/stats/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
@@ -19,17 +17,25 @@ import (
 type CPUMetrics struct {
 	exist bool
 
-	prevUsage     int64
-	prevTimestamp int64
+	PodMetrics *statsv1.Metrics
+	Timestamp  time.Time
 
-	history sample.Sample
+	LastQuota    uint64
+	CurrentQuota uint64
+
+	scaleDown bool
+	margin    float64
+
+	usageHistory        sample.Sample
+	throttleRateHistory sample.Sample
 }
 
 func NewCPUMetrics(maxLength int) *CPUMetrics {
 	return &CPUMetrics{
-		exist:     true,
-		prevUsage: -1,
-		history:   sample.NewFixLengthSample(maxLength),
+		exist:               true,
+		LastQuota:           0,
+		usageHistory:        sample.NewFixLengthSample(maxLength),
+		throttleRateHistory: sample.NewFixLengthSample(maxLength),
 	}
 }
 
@@ -46,42 +52,96 @@ func NewCPUScaler(podmanager *PodManager) *CPUScaler {
 	}
 }
 
+var alpha float64 = 3
+var betaMax float64 = 0.9
+var betaMin float64 = 0.5
+
+func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float64) uint64 {
+	var quota float64
+	throttleRatio := metrics.throttleRateHistory.Last()
+	metrics.margin = max(0, metrics.margin+throttleRatio-throttleTarget)
+	if throttleRatio > alpha*throttleTarget { // scale up
+		if metrics.scaleDown {
+			lastQuota := float64(metrics.LastQuota) / float64(types.DefaultCPUPeriod)
+			quota = lastQuota + (lastQuota - quota)
+			metrics.margin = metrics.margin + throttleRatio - throttleTarget
+		} else {
+			currentQuota := float64(metrics.CurrentQuota) / float64(types.DefaultCPUPeriod)
+			quota = currentQuota * (1 + throttleRatio - alpha*throttleTarget)
+		}
+		metrics.scaleDown = false
+	} else { // scale down
+		proposed := metrics.usageHistory.Max() + metrics.margin*metrics.usageHistory.Stdev()
+		currentQuota := float64(metrics.CurrentQuota) / float64(types.DefaultCPUPeriod)
+		if proposed <= betaMax*currentQuota {
+			quota = max(betaMin*currentQuota, proposed)
+		} else {
+			quota = currentQuota
+		}
+		metrics.scaleDown = true
+	}
+	quota = max(quota, types.DefaultMinCPULimit)
+	quota = min(quota, types.DefaultMaxCPULimit)
+	return uint64(math.Ceil(quota * float64(types.DefaultCPUPeriod)))
+}
+
+func (s *CPUScaler) update(pInfo *PodInfo, quota uint64, metrics *CPUMetrics, state types.CPUState) {
+	_quota, err := s.podmanager.UpdatePodCPUResource(pInfo, quota)
+	if err != nil {
+		klog.ErrorS(err, "failed to update resource")
+	}
+
+	if _quota != quota {
+		klog.Warningf("request quota=%d, got quota=%d",
+			quota, _quota,
+		)
+	}
+
+	pInfo.CPUState = state
+
+	metrics.LastQuota = metrics.CurrentQuota
+	metrics.CurrentQuota = _quota
+}
+
+func (s *CPUScaler) cleanupMetrics() {
+	keys := make([]string, 0, len(s.cpuMetrics))
+	for k := range s.cpuMetrics {
+		keys = append(keys, k)
+	}
+	for _, k := range keys {
+		if s.cpuMetrics[k].exist {
+			s.cpuMetrics[k].exist = false
+		} else {
+			delete(s.cpuMetrics, k)
+		}
+	}
+}
+
 func (s *CPUScaler) Start(ctx context.Context) {
 
-	klog.InfoS("CPU Scaler started", "name", "GenesisRM")
-	t := time.NewTimer(time.Second)
+	klog.InfoS("CPU Scaler started")
+	timer := time.NewTimer(time.Second)
 
 	for {
-		t.Reset(time.Second)
-		selector := labels.NewSelector()
-		requirement, err := labels.NewRequirement(types.STATE_LABEL, selection.Exists, []string{})
-		if err != nil {
-			klog.ErrorS(err, "failed to construct requirement")
-		}
-		selector = selector.Add(*requirement)
-		pods, err := s.podmanager.PodLister.List(selector)
-		if err != nil {
-			klog.ErrorS(err, "failed to list pods")
-		}
-		localPods := make([]*v1.Pod, 0)
-		for _, pod := range pods {
-			if pod.Spec.NodeName == s.podmanager.NodeName {
-				localPods = append(localPods, pod.DeepCopy())
-			}
-		}
+		timer.Reset(time.Second)
+		localPods := s.podmanager.ListLocalPods()
 
 		for _, pod := range localPods {
 
 			key, _ := cache.MetaNamespaceKeyFunc(pod)
-			state := pod.GetLabels()[types.STATE_LABEL]
-			endpoint := pod.GetLabels()[types.ENDPOINT_LABEL]
-
-			v, ok := s.podmanager.PodMap.Load(key)
-			if !ok {
+			pInfo := s.podmanager.PodInfo(pod)
+			if pInfo == nil {
 				delete(s.cpuMetrics, key)
 				continue
 			}
-			pInfo := v.(*PodInfo)
+
+			state := pod.GetLabels()[types.STATE_LABEL]
+			endpoint := pod.GetLabels()[types.ENDPOINT_LABEL]
+			throttleTarget, err := strconv.ParseFloat(pod.GetLabels()["swiftkube.io/throttle-target"], 64)
+			if err != nil {
+				throttleTarget = 0.1
+				klog.ErrorS(err, "failed to parse throttle target to float64")
+			}
 
 			var metrics *CPUMetrics
 			if m, ok := s.cpuMetrics[key]; ok {
@@ -92,111 +152,55 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				s.cpuMetrics[key] = metrics
 			}
 
-			// adjust CPU quota
-			cpuPeriod, err := pInfo.Cgroup.GetCFSPeriod()
-			if err != nil {
-				klog.ErrorS(err, "Fail to read CPU period")
+			if metrics.LastQuota == 0 {
+				metrics.LastQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+				metrics.CurrentQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 			}
-			if state == types.RR {
-				var maxUsage float64 = 0
-				if metrics.history.Count() < types.DefaultMinHistoryLength {
-					maxUsage = types.DefaultMaxCPUQuota / 1000
-				} else {
-					maxUsage = metrics.history.Max()
-				}
-				klog.InfoS("Max CPU usage", "value", fmt.Sprintf("%f", maxUsage), "key", key)
-				// TODO
-				//err = cgWriteInt64(pInfo.cfsQuotaUsFilePath, int64(math.Ceil(float64(cpuPeriod)*maxUsage)))
-				//err = cgWriteInt64(pInfo.cfsQuotaUsFilePath, cpuPeriod*(initalizingCPUQuota/1000))
-				err = pInfo.Cgroup.SetCFSQuota(int64(math.Ceil(float64(cpuPeriod) * types.DefaultMaxCPUQuota)))
-				if err != nil {
-					klog.ErrorS(err, "Fail to set CPU quota")
-				}
-				pInfo.CPUState = types.CPU_DYNAMIC_OVERPROVISION
+			if state == types.RR { // Ready-Running
+				quota := s.dynCalculateQuota(metrics, throttleTarget)
+				s.update(pInfo, quota, metrics, types.CPU_DYNAMIC_OVERPROVISION)
 
-			} else if state == types.RFS {
-				//err = cgWriteInt64(pInfo.cfsQuotaUsFilePath, cpuPeriod*(initalizingCPUQuota/1000))
-				err = pInfo.Cgroup.SetCFSQuota(int64(math.Ceil(float64(cpuPeriod) * types.DefaultMaxCPUQuota)))
-				if err != nil {
-					klog.ErrorS(err, "Fail to set CPU quota")
-				}
-				pInfo.CPUState = types.CPU_MAX
+			} else if state == types.Init || state == types.WU || state == types.RFS { // Initializing WarmingUp Ready-FullSpeed
+				quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+				s.update(pInfo, quota, metrics, types.CPU_MAX)
 
-			} else if state == types.Init || state == types.WU {
-				//err = cgWriteInt64(pInfo.cfsQuotaUsFilePath, cpuPeriod*(initalizingCPUQuota/1000))
-				err = pInfo.Cgroup.SetCFSQuota(int64(math.Ceil(float64(cpuPeriod) * types.DefaultMaxCPUQuota)))
-				if err != nil {
-					klog.ErrorS(err, "Fail to set CPU quota")
-				}
-				pInfo.CPUState = types.CPU_MAX
-
-			} else if state == types.RCN || state == types.RLN {
+			} else if state == types.RCN || state == types.RLN { // Ready-CatNap Ready-LongNap
 				if endpoint == string(types.ENDPOINT_DOWN) {
-					var avgUsage float64 = 0
-					if metrics.history.Count() > types.DefaultMinHistoryLength {
-						avgUsage = metrics.history.Mean()
-					} else {
-						avgUsage = types.DefaultMaxCPUQuota / 1000
-					}
-					klog.InfoS("Mean CPU usage", "value", fmt.Sprintf("%f", avgUsage), "key", key)
-					// TODO
-					//err = cgWriteInt64(pInfo.cfsQuotaUsFilePath, int64(math.Ceil(float64(cpuPeriod)*avgUsage/0.6)))
-					//err = cgWriteInt64(pInfo.cfsQuotaUsFilePath, cpuPeriod*(initalizingCPUQuota/1000))
-					err = pInfo.Cgroup.SetCFSQuota(int64(math.Ceil(float64(cpuPeriod) * types.DefaultMaxCPUQuota)))
-					if err != nil {
-						klog.ErrorS(err, "Fail to set CPU quota")
-					}
-					pInfo.CPUState = types.CPU_DYNAMIC_RESOURCE_EFFICIENT
+					quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+					s.update(pInfo, quota, metrics, types.CPU_DYNAMIC_RESOURCE_EFFICIENT)
 				} else {
-					//err = cgWriteInt64(pInfo.cfsQuotaUsFilePath, cpuPeriod*(initalizingCPUQuota/1000))
-					err = pInfo.Cgroup.SetCFSQuota(int64(math.Ceil(float64(cpuPeriod) * types.DefaultMaxCPUQuota)))
-					if err != nil {
-						klog.ErrorS(err, "Fail to set CPU quota")
-					}
-					pInfo.CPUState = types.CPU_MAX
+					quota := s.dynCalculateQuota(metrics, throttleTarget)
+					s.update(pInfo, quota, metrics, types.CPU_MAX)
 				}
 			}
 
-			var acctUsage int64 = 0
-			for _, containerInfo := range pInfo.ContainerInfos {
-				perContainerUsage, err := containerInfo.Cgroup.GetCPUAcctUsage()
-				if err != nil {
-					klog.ErrorS(err, "Fail to read CPU usage")
+			podMetrics, err := pInfo.Cgroup.Containerd.Stat()
+
+			if err != nil {
+				klog.ErrorS(err, "failed to stat")
+				s.cpuMetrics[key].PodMetrics = nil
+			} else {
+				prevPodMetrics := s.cpuMetrics[key].PodMetrics
+				prevTimestamp := s.cpuMetrics[key].Timestamp
+				timestamp := time.Now()
+				duration := timestamp.Sub(prevTimestamp).Nanoseconds()
+
+				if prevPodMetrics != nil {
+					throttlingRate := float64(prevPodMetrics.CPU.Throttling.ThrottledPeriods-podMetrics.CPU.Throttling.ThrottledPeriods) /
+						float64(prevPodMetrics.CPU.Throttling.Periods-podMetrics.CPU.Throttling.Periods)
+					s.cpuMetrics[key].throttleRateHistory.Update(throttlingRate)
+
+					usage := float64(podMetrics.CPU.Usage.Total-prevPodMetrics.CPU.Usage.Total) / float64(duration)
+					s.cpuMetrics[key].usageHistory.Update(usage)
 				}
-				acctUsage += perContainerUsage
-			}
 
-			// Year 2262
-			timestamp := time.Now().UnixNano()
-
-			// calculate CPU usage
-			prevUsage := s.cpuMetrics[key].prevUsage
-			prevTimestamp := s.cpuMetrics[key].prevTimestamp
-			if prevUsage != -1 {
-				cpuUsage := float64(acctUsage-prevUsage) / float64(timestamp-prevTimestamp)
-				s.cpuMetrics[key].history.Update(cpuUsage)
-			} else {
-				klog.InfoS("first metric", "key", key)
-			}
-
-			s.cpuMetrics[key].prevUsage = acctUsage
-			s.cpuMetrics[key].prevTimestamp = timestamp
-		}
-
-		keys := make([]string, 0, len(s.cpuMetrics))
-		for k := range s.cpuMetrics {
-			keys = append(keys, k)
-		}
-
-		for _, k := range keys {
-			if s.cpuMetrics[k].exist {
-				s.cpuMetrics[k].exist = false
-			} else {
-				delete(s.cpuMetrics, k)
-				klog.InfoS("delete CPU metrics", "key", k)
+				s.cpuMetrics[key].Timestamp = timestamp
+				s.cpuMetrics[key].PodMetrics = podMetrics
 			}
 		}
 
-		<-t.C
+		s.cleanupMetrics()
+
+		<-timer.C
 	}
 }

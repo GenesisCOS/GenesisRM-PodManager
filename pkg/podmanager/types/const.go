@@ -27,8 +27,9 @@ const (
 )
 
 const (
-	DefaultMaxCPUQuota = float64(3)
-	DefaultMinCPUQuota = float64(0.1)
+	DefaultCPUPeriod   uint64  = 100000 // us
+	DefaultMaxCPULimit float64 = 3      // core
+	DefaultMinCPULimit float64 = 0.1    // core
 
 	RR   = "Ready-Running"
 	RCN  = "Ready-CatNap"
