@@ -43,7 +43,8 @@ const (
 // entries here should be moved to staging/src/k8s.io.api/core/v1/types.go
 // once the feature managing the condition graduates to Beta.
 const (
-	// PodReadyToStartContainers pod sandbox is successfully configured and
-	// the pod is ready to launch containers.
-	PodReadyToStartContainers = "PodReadyToStartContainers"
+	// PodHasNetwork indicates networking has been configured successfully for the
+	// pod and IP address(es) assigned. Images for containers specified in the pod
+	// spec can be pulled and containers launched after this condition is true.
+	PodHasNetwork = "PodHasNetwork"
 )

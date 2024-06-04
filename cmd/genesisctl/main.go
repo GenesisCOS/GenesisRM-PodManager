@@ -1,14 +1,21 @@
 package main
 
 import (
+	_ "fmt"
+
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/component-base/cli"
-	"k8s.io/kubectl/pkg/cmd"
-	"k8s.io/kubectl/pkg/cmd/util"
+	kubectlcmd "k8s.io/kubectl/pkg/cmd"
+	kubectlcmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
 func main() {
-	command := cmd.NewDefaultKubectlCommand()
+	runKubectl()
+}
+
+func runKubectl() {
+	command := kubectlcmd.NewDefaultKubectlCommand()
 	if err := cli.RunNoErrOutput(command); err != nil {
-		util.CheckErr(err)
+		kubectlcmdutil.CheckErr(err)
 	}
 }

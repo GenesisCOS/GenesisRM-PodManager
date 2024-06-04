@@ -22,6 +22,7 @@ package common
 import (
 	"bufio"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"regexp"
@@ -143,7 +144,7 @@ func doRunXFSQuotaCommand(mountpoint string, mountsFile, command string) (string
 // See https://bugzilla.redhat.com/show_bug.cgi?id=237120 for an example
 // of the problem that could be caused if this were to happen.
 func runXFSQuotaCommand(mountpoint string, command string) (string, error) {
-	tmpMounts, err := os.CreateTemp("", "mounts")
+	tmpMounts, err := ioutil.TempFile("", "mounts")
 	if err != nil {
 		return "", fmt.Errorf("cannot create temporary mount file: %v", err)
 	}

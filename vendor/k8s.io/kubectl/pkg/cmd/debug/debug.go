@@ -38,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/kubernetes"
@@ -136,14 +135,14 @@ type DebugOptions struct {
 	podClient corev1client.CoreV1Interface
 
 	Builder *resource.Builder
-	genericiooptions.IOStreams
+	genericclioptions.IOStreams
 	WarningPrinter *printers.WarningPrinter
 
 	resource.FilenameOptions
 }
 
 // NewDebugOptions returns a DebugOptions initialized with default values.
-func NewDebugOptions(streams genericiooptions.IOStreams) *DebugOptions {
+func NewDebugOptions(streams genericclioptions.IOStreams) *DebugOptions {
 	return &DebugOptions{
 		Args:           []string{},
 		IOStreams:      streams,
@@ -153,7 +152,7 @@ func NewDebugOptions(streams genericiooptions.IOStreams) *DebugOptions {
 }
 
 // NewCmdDebug returns a cobra command that runs kubectl debug.
-func NewCmdDebug(restClientGetter genericclioptions.RESTClientGetter, streams genericiooptions.IOStreams) *cobra.Command {
+func NewCmdDebug(restClientGetter genericclioptions.RESTClientGetter, streams genericclioptions.IOStreams) *cobra.Command {
 	o := NewDebugOptions(streams)
 
 	cmd := &cobra.Command{

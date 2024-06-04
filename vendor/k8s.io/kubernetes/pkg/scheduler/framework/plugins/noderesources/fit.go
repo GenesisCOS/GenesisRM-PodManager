@@ -24,6 +24,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+
 	"k8s.io/kubernetes/pkg/api/v1/resource"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
@@ -81,10 +82,9 @@ var nodeResourceStrategyTypeMap = map[config.ScoringStrategyType]scorer{
 
 // Fit is a plugin that checks if a node has sufficient resources.
 type Fit struct {
-	ignoredResources                sets.Set[string]
-	ignoredResourceGroups           sets.Set[string]
+	ignoredResources                sets.String
+	ignoredResourceGroups           sets.String
 	enableInPlacePodVerticalScaling bool
-	enableSidecarContainers         bool
 	handle                          framework.Handle
 	resourceAllocationScorer
 }
@@ -165,10 +165,9 @@ func NewFit(plArgs runtime.Object, h framework.Handle, fts feature.Features) (fr
 	}
 
 	return &Fit{
-		ignoredResources:                sets.New(args.IgnoredResources...),
-		ignoredResourceGroups:           sets.New(args.IgnoredResourceGroups...),
+		ignoredResources:                sets.NewString(args.IgnoredResources...),
+		ignoredResourceGroups:           sets.NewString(args.IgnoredResourceGroups...),
 		enableInPlacePodVerticalScaling: fts.EnableInPlacePodVerticalScaling,
-		enableSidecarContainers:         fts.EnableSidecarContainers,
 		handle:                          h,
 		resourceAllocationScorer:        *scorePlugin(args),
 	}, nil
@@ -236,16 +235,16 @@ func getPreFilterState(cycleState *framework.CycleState) (*preFilterState, error
 
 // EventsToRegister returns the possible events that may make a Pod
 // failed by this plugin schedulable.
-func (f *Fit) EventsToRegister() []framework.ClusterEventWithHint {
+func (f *Fit) EventsToRegister() []framework.ClusterEvent {
 	podActionType := framework.Delete
 	if f.enableInPlacePodVerticalScaling {
 		// If InPlacePodVerticalScaling (KEP 1287) is enabled, then PodUpdate event should be registered
 		// for this plugin since a Pod update may free up resources that make other Pods schedulable.
 		podActionType |= framework.Update
 	}
-	return []framework.ClusterEventWithHint{
-		{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: podActionType}},
-		{Event: framework.ClusterEvent{Resource: framework.Node, ActionType: framework.Add | framework.Update}},
+	return []framework.ClusterEvent{
+		{Resource: framework.Pod, ActionType: podActionType},
+		{Resource: framework.Node, ActionType: framework.Add | framework.Update},
 	}
 }
 
@@ -253,15 +252,6 @@ func (f *Fit) EventsToRegister() []framework.ClusterEventWithHint {
 // Checks if a node has sufficient resources, such as cpu, memory, gpu, opaque int resources etc to run a pod.
 // It returns a list of insufficient resources, if empty, then the node has all the resources requested by the pod.
 func (f *Fit) Filter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
-	if !f.enableSidecarContainers && hasRestartableInitContainer(pod) {
-		// Scheduler will calculate resources usage for a Pod containing
-		// restartable init containers that will be equal or more than kubelet will
-		// require to run the Pod. So there will be no overbooking. However, to
-		// avoid the inconsistency in resource calculation between the scheduler
-		// and the older (before v1.28) kubelet, make the Pod unschedulable.
-		return framework.NewStatus(framework.UnschedulableAndUnresolvable, "Pod has a restartable init container and the SidecarContainers feature is disabled")
-	}
-
 	s, err := getPreFilterState(cycleState)
 	if err != nil {
 		return framework.AsStatus(err)
@@ -280,15 +270,6 @@ func (f *Fit) Filter(ctx context.Context, cycleState *framework.CycleState, pod 
 	return nil
 }
 
-func hasRestartableInitContainer(pod *v1.Pod) bool {
-	for _, c := range pod.Spec.InitContainers {
-		if c.RestartPolicy != nil && *c.RestartPolicy == v1.ContainerRestartPolicyAlways {
-			return true
-		}
-	}
-	return false
-}
-
 // InsufficientResource describes what kind of resource limit is hit and caused the pod to not fit the node.
 type InsufficientResource struct {
 	ResourceName v1.ResourceName
@@ -305,7 +286,7 @@ func Fits(pod *v1.Pod, nodeInfo *framework.NodeInfo) []InsufficientResource {
 	return fitsRequest(computePodResourceRequest(pod), nodeInfo, nil, nil)
 }
 
-func fitsRequest(podRequest *preFilterState, nodeInfo *framework.NodeInfo, ignoredExtendedResources, ignoredResourceGroups sets.Set[string]) []InsufficientResource {
+func fitsRequest(podRequest *preFilterState, nodeInfo *framework.NodeInfo, ignoredExtendedResources, ignoredResourceGroups sets.String) []InsufficientResource {
 	insufficientResources := make([]InsufficientResource, 0, 4)
 
 	allowedPodNumber := nodeInfo.Allocatable.AllowedPodNumber
@@ -326,7 +307,7 @@ func fitsRequest(podRequest *preFilterState, nodeInfo *framework.NodeInfo, ignor
 		return insufficientResources
 	}
 
-	if podRequest.MilliCPU > 0 && podRequest.MilliCPU > (nodeInfo.Allocatable.MilliCPU-nodeInfo.Requested.MilliCPU) {
+	if podRequest.MilliCPU > (nodeInfo.Allocatable.MilliCPU - nodeInfo.Requested.MilliCPU) {
 		insufficientResources = append(insufficientResources, InsufficientResource{
 			ResourceName: v1.ResourceCPU,
 			Reason:       "Insufficient cpu",
@@ -335,7 +316,7 @@ func fitsRequest(podRequest *preFilterState, nodeInfo *framework.NodeInfo, ignor
 			Capacity:     nodeInfo.Allocatable.MilliCPU,
 		})
 	}
-	if podRequest.Memory > 0 && podRequest.Memory > (nodeInfo.Allocatable.Memory-nodeInfo.Requested.Memory) {
+	if podRequest.Memory > (nodeInfo.Allocatable.Memory - nodeInfo.Requested.Memory) {
 		insufficientResources = append(insufficientResources, InsufficientResource{
 			ResourceName: v1.ResourceMemory,
 			Reason:       "Insufficient memory",
@@ -344,8 +325,7 @@ func fitsRequest(podRequest *preFilterState, nodeInfo *framework.NodeInfo, ignor
 			Capacity:     nodeInfo.Allocatable.Memory,
 		})
 	}
-	if podRequest.EphemeralStorage > 0 &&
-		podRequest.EphemeralStorage > (nodeInfo.Allocatable.EphemeralStorage-nodeInfo.Requested.EphemeralStorage) {
+	if podRequest.EphemeralStorage > (nodeInfo.Allocatable.EphemeralStorage - nodeInfo.Requested.EphemeralStorage) {
 		insufficientResources = append(insufficientResources, InsufficientResource{
 			ResourceName: v1.ResourceEphemeralStorage,
 			Reason:       "Insufficient ephemeral-storage",
@@ -401,5 +381,5 @@ func (f *Fit) Score(ctx context.Context, state *framework.CycleState, pod *v1.Po
 		}
 	}
 
-	return f.score(ctx, pod, nodeInfo, s.podRequests)
+	return f.score(pod, nodeInfo, s.podRequests)
 }

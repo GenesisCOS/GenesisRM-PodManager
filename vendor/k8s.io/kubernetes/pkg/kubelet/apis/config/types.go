@@ -123,7 +123,6 @@ type KubeletConfiguration struct {
 	// tlsPrivateKeyFile is the file containing x509 private key matching tlsCertFile
 	TLSPrivateKeyFile string
 	// TLSCipherSuites is the list of allowed cipher suites for the server.
-	// Note that TLS 1.3 ciphersuites are not configurable.
 	// Values are from tls package constants (https://golang.org/pkg/crypto/tls/#pkg-constants).
 	TLSCipherSuites []string
 	// TLSMinVersion is the minimum TLS version supported.
@@ -319,15 +318,17 @@ type KubeletConfiguration struct {
 	// flags are not as it expects. Otherwise the Kubelet will attempt to modify
 	// kernel flags to match its expectation.
 	ProtectKernelDefaults bool
-	// If true, Kubelet creates the KUBE-IPTABLES-HINT chain in iptables as a hint to
-	// other components about the configuration of iptables on the system.
+	// If true, Kubelet ensures a set of iptables rules are present on host.
+	// These rules will serve as utility for various components, e.g. kube-proxy.
+	// The rules will be created based on IPTablesMasqueradeBit and IPTablesDropBit.
 	MakeIPTablesUtilChains bool
-	// iptablesMasqueradeBit formerly controlled the creation of the KUBE-MARK-MASQ
-	// chain.
-	// Deprecated: no longer has any effect.
+	// iptablesMasqueradeBit is the bit of the iptables fwmark space to mark for SNAT
+	// Values must be within the range [0, 31]. Must be different from other mark bits.
+	// Warning: Please match the value of the corresponding parameter in kube-proxy.
+	// TODO: clean up IPTablesMasqueradeBit in kube-proxy
 	IPTablesMasqueradeBit int32
-	// iptablesDropBit formerly controlled the creation of the KUBE-MARK-DROP chain.
-	// Deprecated: no longer has any effect.
+	// iptablesDropBit is the bit of the iptables fwmark space to mark for dropping packets.
+	// Values must be within the range [0, 31]. Must be different from other mark bits.
 	IPTablesDropBit int32
 	// featureGates is a map of feature names to bools that enable or disable alpha/experimental
 	// features. This field modifies piecemeal the built-in default values from

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 
 	"k8s.io/klog/v2"
 	utilexec "k8s.io/utils/exec"
+	utilio "k8s.io/utils/io"
 )
 
 const (
@@ -269,7 +271,7 @@ func detectSafeNotMountedBehavior() bool {
 // detectSafeNotMountedBehaviorWithExec is for testing with FakeExec.
 func detectSafeNotMountedBehaviorWithExec(exec utilexec.Interface) bool {
 	// create a temp dir and try to umount it
-	path, err := os.MkdirTemp("", "kubelet-detect-safe-umount")
+	path, err := ioutil.TempDir("", "kubelet-detect-safe-umount")
 	if err != nil {
 		klog.V(4).Infof("Cannot create temp dir to detect safe 'not mounted' behavior: %v", err)
 		return false
@@ -631,7 +633,7 @@ func (mounter *SafeFormatAndMount) GetDiskFormat(disk string) (string, error) {
 
 // ListProcMounts is shared with NsEnterMounter
 func ListProcMounts(mountFilePath string) ([]MountPoint, error) {
-	content, err := readMountInfo(mountFilePath)
+	content, err := utilio.ConsistentRead(mountFilePath, maxListTries)
 	if err != nil {
 		return nil, err
 	}
@@ -764,7 +766,7 @@ func (mounter *Mounter) IsMountPoint(file string) (bool, error) {
 	// Resolve any symlinks in file, kernel would do the same and use the resolved path in /proc/mounts.
 	resolvedFile, err := filepath.EvalSymlinks(file)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(isMntErr, fs.ErrNotExist) {
 			return false, fs.ErrNotExist
 		}
 		return false, err
@@ -808,6 +810,7 @@ func tryUnmount(target string, withSafeNotMountedBehavior bool, unmountTimeout t
 func forceUmount(target string, withSafeNotMountedBehavior bool) error {
 	command := exec.Command("umount", "-f", target)
 	output, err := command.CombinedOutput()
+
 	if err != nil {
 		return checkUmountError(target, command, output, err, withSafeNotMountedBehavior)
 	}

@@ -429,7 +429,6 @@ func autoConvert_v1_KubeSchedulerConfiguration_To_config_KubeSchedulerConfigurat
 		out.Profiles = nil
 	}
 	out.Extenders = *(*[]config.Extender)(unsafe.Pointer(&in.Extenders))
-	out.DelayCacheUntilActive = in.DelayCacheUntilActive
 	return nil
 }
 
@@ -467,7 +466,6 @@ func autoConvert_config_KubeSchedulerConfiguration_To_v1_KubeSchedulerConfigurat
 		out.Profiles = nil
 	}
 	out.Extenders = *(*[]v1.Extender)(unsafe.Pointer(&in.Extenders))
-	out.DelayCacheUntilActive = in.DelayCacheUntilActive
 	return nil
 }
 

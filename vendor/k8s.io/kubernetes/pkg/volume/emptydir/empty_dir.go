@@ -519,12 +519,10 @@ func (ed *emptyDir) TearDownAt(dir string) error {
 }
 
 func (ed *emptyDir) teardownDefault(dir string) error {
-	if utilfeature.DefaultFeatureGate.Enabled(features.LocalStorageCapacityIsolationFSQuotaMonitoring) {
-		// Remove any quota
-		err := fsquota.ClearQuota(ed.mounter, dir)
-		if err != nil {
-			klog.Warningf("Warning: Failed to clear quota on %s: %v", dir, err)
-		}
+	// Remove any quota
+	err := fsquota.ClearQuota(ed.mounter, dir)
+	if err != nil {
+		klog.Warningf("Warning: Failed to clear quota on %s: %v", dir, err)
 	}
 	// Renaming the directory is not required anymore because the operation executor
 	// now handles duplicate operations on the same volume

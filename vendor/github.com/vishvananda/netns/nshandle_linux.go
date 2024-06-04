@@ -30,7 +30,7 @@ func (ns NsHandle) Equal(other NsHandle) bool {
 // String shows the file descriptor number and its dev and inode.
 func (ns NsHandle) String() string {
 	if ns == -1 {
-		return "NS(none)"
+		return "NS(None)"
 	}
 	var s unix.Stat_t
 	if err := unix.Fstat(int(ns), &s); err != nil {

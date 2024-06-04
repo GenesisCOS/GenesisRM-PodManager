@@ -35,7 +35,6 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/framework/parallelize"
 )
@@ -323,15 +322,13 @@ type QueueSortPlugin interface {
 // move unschedulable Pods in internal scheduling queues. Plugins
 // that fail pod scheduling (e.g., Filter plugins) are expected to implement this interface.
 type EnqueueExtensions interface {
-	Plugin
 	// EventsToRegister returns a series of possible events that may cause a Pod
-	// failed by this plugin schedulable. Each event has a callback function that
-	// filters out events to reduce useless retry of Pod's scheduling.
+	// failed by this plugin schedulable.
 	// The events will be registered when instantiating the internal scheduling queue,
 	// and leveraged to build event handlers dynamically.
 	// Note: the returned list needs to be static (not depend on configuration parameters);
 	// otherwise it would lead to undefined behavior.
-	EventsToRegister() []ClusterEventWithHint
+	EventsToRegister() []ClusterEvent
 }
 
 // PreFilterExtensions is an interface that is included in plugins that allow specifying
@@ -515,9 +512,6 @@ type Framework interface {
 	// PreEnqueuePlugins returns the registered preEnqueue plugins.
 	PreEnqueuePlugins() []PreEnqueuePlugin
 
-	// EnqueueExtensions returns the registered Enqueue extensions.
-	EnqueueExtensions() []EnqueueExtensions
-
 	// QueueSortFunc returns the function to sort pods in scheduling queue
 	QueueSortFunc() LessFunc
 
@@ -647,7 +641,7 @@ type Handle interface {
 type PreFilterResult struct {
 	// The set of nodes that should be considered downstream; if nil then
 	// all nodes are eligible.
-	NodeNames sets.Set[string]
+	NodeNames sets.String
 }
 
 func (p *PreFilterResult) AllNodes() bool {
@@ -710,11 +704,11 @@ func (ni *NominatingInfo) Mode() NominatingMode {
 type PodNominator interface {
 	// AddNominatedPod adds the given pod to the nominator or
 	// updates it if it already exists.
-	AddNominatedPod(logger klog.Logger, pod *PodInfo, nominatingInfo *NominatingInfo)
+	AddNominatedPod(pod *PodInfo, nominatingInfo *NominatingInfo)
 	// DeleteNominatedPodIfExists deletes nominatedPod from internal cache. It's a no-op if it doesn't exist.
 	DeleteNominatedPodIfExists(pod *v1.Pod)
 	// UpdateNominatedPod updates the <oldPod> with <newPod>.
-	UpdateNominatedPod(logger klog.Logger, oldPod *v1.Pod, newPodInfo *PodInfo)
+	UpdateNominatedPod(oldPod *v1.Pod, newPodInfo *PodInfo)
 	// NominatedPodsForNode returns nominatedPods on the given node.
 	NominatedPodsForNode(nodeName string) []*PodInfo
 }

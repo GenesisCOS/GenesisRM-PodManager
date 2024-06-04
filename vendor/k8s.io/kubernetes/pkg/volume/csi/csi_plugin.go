@@ -217,7 +217,7 @@ func (p *csiPlugin) Init(host volume.VolumeHost) error {
 
 	var migratedPlugins = map[string](func() bool){
 		csitranslationplugins.GCEPDInTreePluginName: func() bool {
-			return true
+			return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationGCE)
 		},
 		csitranslationplugins.AWSEBSInTreePluginName: func() bool {
 			return true

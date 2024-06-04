@@ -353,11 +353,10 @@ func AssignQuota(m mount.Interface, path string, poduid types.UID, bytes *resour
 		}
 		// When enforcing quotas are enabled, we'll condition this
 		// on their being disabled also.
-		fsbytes := ibytes
-		if fsbytes > 0 {
-			fsbytes = -1
+		if ibytes > 0 {
+			ibytes = -1
 		}
-		if err = setQuotaOnDir(path, id, fsbytes); err == nil {
+		if err = setQuotaOnDir(path, id, ibytes); err == nil {
 			quotaPodMap[id] = internalPodUid
 			quotaSizeMap[id] = ibytes
 			podQuotaMap[internalPodUid] = id
@@ -365,7 +364,7 @@ func AssignQuota(m mount.Interface, path string, poduid types.UID, bytes *resour
 			dirPodMap[path] = internalPodUid
 			podUidMap[internalPodUid] = externalPodUid
 			podDirCountMap[internalPodUid]++
-			klog.V(4).Infof("Assigning quota ID %d (request limit %d, actual limit %d) to %s", id, ibytes, fsbytes, path)
+			klog.V(4).Infof("Assigning quota ID %d (%d) to %s", id, ibytes, path)
 			return nil
 		}
 		removeProjectID(path, id)

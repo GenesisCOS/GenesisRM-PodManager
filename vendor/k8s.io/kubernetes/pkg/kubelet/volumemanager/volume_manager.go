@@ -17,7 +17,6 @@ limitations under the License.
 package volumemanager
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -39,6 +38,7 @@ import (
 	csitrans "k8s.io/csi-translation-lib"
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	"k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/pod"
 	"k8s.io/kubernetes/pkg/kubelet/volumemanager/cache"
 	"k8s.io/kubernetes/pkg/kubelet/volumemanager/metrics"
 	"k8s.io/kubernetes/pkg/kubelet/volumemanager/populator"
@@ -97,14 +97,14 @@ type VolumeManager interface {
 	// actual state of the world).
 	// An error is returned if all volumes are not attached and mounted within
 	// the duration defined in podAttachAndMountTimeout.
-	WaitForAttachAndMount(ctx context.Context, pod *v1.Pod) error
+	WaitForAttachAndMount(pod *v1.Pod) error
 
 	// WaitForUnmount processes the volumes referenced in the specified
 	// pod and blocks until they are all unmounted (reflected in the actual
 	// state of the world).
 	// An error is returned if all volumes are not unmounted within
 	// the duration defined in podAttachAndMountTimeout.
-	WaitForUnmount(ctx context.Context, pod *v1.Pod) error
+	WaitForUnmount(pod *v1.Pod) error
 
 	// GetMountedVolumesForPod returns a VolumeMap containing the volumes
 	// referenced by the specified pod that are successfully attached and
@@ -150,16 +150,9 @@ type VolumeManager interface {
 }
 
 // podStateProvider can determine if a pod is going to be terminated
-type PodStateProvider interface {
+type podStateProvider interface {
 	ShouldPodContainersBeTerminating(k8stypes.UID) bool
 	ShouldPodRuntimeBeRemoved(k8stypes.UID) bool
-}
-
-// PodManager is the subset of methods the manager needs to observe the actual state of the kubelet.
-// See pkg/k8s.io/kubernetes/pkg/kubelet/pod.Manager for method godoc.
-type PodManager interface {
-	GetPodByUID(k8stypes.UID) (*v1.Pod, bool)
-	GetPods() []*v1.Pod
 }
 
 // NewVolumeManager returns a new concrete instance implementing the
@@ -173,8 +166,8 @@ type PodManager interface {
 func NewVolumeManager(
 	controllerAttachDetachEnabled bool,
 	nodeName k8stypes.NodeName,
-	podManager PodManager,
-	podStateProvider PodStateProvider,
+	podManager pod.Manager,
+	podStateProvider podStateProvider,
 	kubeClient clientset.Interface,
 	volumePluginMgr *volume.VolumePluginMgr,
 	kubeContainerRuntime container.Runtime,
@@ -392,7 +385,7 @@ func (vm *volumeManager) MarkVolumesAsReportedInUse(
 	vm.desiredStateOfWorld.MarkVolumesReportedInUse(volumesReportedAsInUse)
 }
 
-func (vm *volumeManager) WaitForAttachAndMount(ctx context.Context, pod *v1.Pod) error {
+func (vm *volumeManager) WaitForAttachAndMount(pod *v1.Pod) error {
 	if pod == nil {
 		return nil
 	}
@@ -411,11 +404,9 @@ func (vm *volumeManager) WaitForAttachAndMount(ctx context.Context, pod *v1.Pod)
 	// like Downward API, depend on this to update the contents of the volume).
 	vm.desiredStateOfWorldPopulator.ReprocessPod(uniquePodName)
 
-	err := wait.PollUntilContextTimeout(
-		ctx,
+	err := wait.PollImmediate(
 		podAttachAndMountRetryInterval,
 		podAttachAndMountTimeout,
-		true,
 		vm.verifyVolumesMountedFunc(uniquePodName, expectedVolumes))
 
 	if err != nil {
@@ -432,7 +423,7 @@ func (vm *volumeManager) WaitForAttachAndMount(ctx context.Context, pod *v1.Pod)
 		}
 
 		return fmt.Errorf(
-			"unmounted volumes=%v, unattached volumes=%v, failed to process volumes=%v: %w",
+			"unmounted volumes=%v, unattached volumes=%v, failed to process volumes=%v: %s",
 			unmountedVolumes,
 			unattachedVolumes,
 			volumesNotInDSW,
@@ -443,7 +434,7 @@ func (vm *volumeManager) WaitForAttachAndMount(ctx context.Context, pod *v1.Pod)
 	return nil
 }
 
-func (vm *volumeManager) WaitForUnmount(ctx context.Context, pod *v1.Pod) error {
+func (vm *volumeManager) WaitForUnmount(pod *v1.Pod) error {
 	if pod == nil {
 		return nil
 	}
@@ -453,11 +444,9 @@ func (vm *volumeManager) WaitForUnmount(ctx context.Context, pod *v1.Pod) error 
 
 	vm.desiredStateOfWorldPopulator.ReprocessPod(uniquePodName)
 
-	err := wait.PollUntilContextTimeout(
-		ctx,
+	err := wait.PollImmediate(
 		podAttachAndMountRetryInterval,
 		podAttachAndMountTimeout,
-		true,
 		vm.verifyVolumesUnmountedFunc(uniquePodName))
 
 	if err != nil {
@@ -472,7 +461,7 @@ func (vm *volumeManager) WaitForUnmount(ctx context.Context, pod *v1.Pod) error 
 		}
 
 		return fmt.Errorf(
-			"mounted volumes=%v: %w",
+			"mounted volumes=%v: %s",
 			mountedVolumes,
 			err)
 	}
@@ -504,15 +493,14 @@ func (vm *volumeManager) getUnattachedVolumes(uniquePodName types.UniquePodName)
 			unattachedVolumes = append(unattachedVolumes, volumeToMount.OuterVolumeSpecName)
 		}
 	}
-	sort.Strings(unattachedVolumes)
 
 	return unattachedVolumes
 }
 
 // verifyVolumesMountedFunc returns a method that returns true when all expected
 // volumes are mounted.
-func (vm *volumeManager) verifyVolumesMountedFunc(podName types.UniquePodName, expectedVolumes []string) wait.ConditionWithContextFunc {
-	return func(_ context.Context) (done bool, err error) {
+func (vm *volumeManager) verifyVolumesMountedFunc(podName types.UniquePodName, expectedVolumes []string) wait.ConditionFunc {
+	return func() (done bool, err error) {
 		if errs := vm.desiredStateOfWorld.PopPodErrors(podName); len(errs) > 0 {
 			return true, errors.New(strings.Join(errs, "; "))
 		}
@@ -522,8 +510,8 @@ func (vm *volumeManager) verifyVolumesMountedFunc(podName types.UniquePodName, e
 
 // verifyVolumesUnmountedFunc returns a method that is true when there are no mounted volumes for this
 // pod.
-func (vm *volumeManager) verifyVolumesUnmountedFunc(podName types.UniquePodName) wait.ConditionWithContextFunc {
-	return func(_ context.Context) (done bool, err error) {
+func (vm *volumeManager) verifyVolumesUnmountedFunc(podName types.UniquePodName) wait.ConditionFunc {
+	return func() (done bool, err error) {
 		if errs := vm.desiredStateOfWorld.PopPodErrors(podName); len(errs) > 0 {
 			return true, errors.New(strings.Join(errs, "; "))
 		}
@@ -552,8 +540,6 @@ func filterUnmountedVolumes(mountedVolumes sets.String, expectedVolumes []string
 			unmountedVolumes = append(unmountedVolumes, expectedVolume)
 		}
 	}
-	sort.Strings(unmountedVolumes)
-
 	return unmountedVolumes
 }
 

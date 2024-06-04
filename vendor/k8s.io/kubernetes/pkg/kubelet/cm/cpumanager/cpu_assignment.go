@@ -24,7 +24,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
-	"k8s.io/utils/cpuset"
+	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
 )
 
 // LoopControl controls the behavior of the cpu accumulator loop logic

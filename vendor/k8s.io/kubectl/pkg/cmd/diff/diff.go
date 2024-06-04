@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/cli-runtime/pkg/genericiooptions"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/klog/v2"
@@ -107,7 +107,6 @@ type DiffOptions struct {
 	ForceConflicts    bool
 	ShowManagedFields bool
 
-	Concurrency      int
 	Selector         string
 	OpenAPISchema    openapi.Resources
 	DynamicClient    dynamic.Interface
@@ -120,7 +119,7 @@ type DiffOptions struct {
 	tracker *tracker
 }
 
-func NewDiffOptions(ioStreams genericiooptions.IOStreams) *DiffOptions {
+func NewDiffOptions(ioStreams genericclioptions.IOStreams) *DiffOptions {
 	return &DiffOptions{
 		Diff: &DiffProgram{
 			Exec:      exec.New(),
@@ -129,7 +128,7 @@ func NewDiffOptions(ioStreams genericiooptions.IOStreams) *DiffOptions {
 	}
 }
 
-func NewCmdDiff(f cmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Command {
+func NewCmdDiff(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	options := NewDiffOptions(streams)
 	cmd := &cobra.Command{
 		Use:                   "diff -f FILENAME",
@@ -167,7 +166,6 @@ func NewCmdDiff(f cmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Co
 	cmd.Flags().StringArray("prune-allowlist", []string{}, "Overwrite the default whitelist with <group/version/kind> for --prune")
 	cmd.Flags().Bool("prune", false, "Include resources that would be deleted by pruning. Can be used with -l and default shows all resources would be pruned")
 	cmd.Flags().BoolVar(&options.ShowManagedFields, "show-managed-fields", options.ShowManagedFields, "If true, include managed fields in the diff.")
-	cmd.Flags().IntVar(&options.Concurrency, "concurrency", 1, "Number of objects to process in parallel when diffing against the live version. Larger number = faster, but more memory, I/O and CPU over that shorter period of time.")
 	cmdutil.AddFilenameOptionFlags(cmd, &options.FilenameOptions, usage)
 	cmdutil.AddServerSideApplyFlags(cmd)
 	cmdutil.AddFieldManagerFlagVar(cmd, &options.FieldManager, apply.FieldManagerClientSideApply)
@@ -181,7 +179,7 @@ func NewCmdDiff(f cmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Co
 // program. By default, `diff(1)` will be used.
 type DiffProgram struct {
 	Exec exec.Interface
-	genericiooptions.IOStreams
+	genericclioptions.IOStreams
 }
 
 func (d *DiffProgram) getCommand(args ...string) (string, exec.Cmd) {
@@ -328,7 +326,7 @@ type InfoObject struct {
 	ServerSideApply bool
 	FieldManager    string
 	ForceConflicts  bool
-	genericiooptions.IOStreams
+	genericclioptions.IOStreams
 }
 
 var _ Object = &InfoObject{}
@@ -685,7 +683,6 @@ func (o *DiffOptions) Run() error {
 
 	r := o.Builder.
 		Unstructured().
-		VisitorConcurrency(o.Concurrency).
 		NamespaceParam(o.CmdNamespace).DefaultNamespace().
 		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
 		LabelSelectorParam(o.Selector).

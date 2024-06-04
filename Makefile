@@ -15,10 +15,28 @@ build-image: ${BUILD_TGTS}
 build_binary: ${BUILD_TGTS}
 
 build_agent: ${OUTPUT}
-	${GO_BIN} build -o ${OUTPUT}/genesis-agent cmd/genesis-agent/main.go 
+	${GO_BIN} build \
+		-ldflags "-X k8s.io/component-base/version.gitVersion=v1.27.2-genesis" \
+		-o ${OUTPUT}/genesis-agent cmd/genesis-agent/main.go
+
+setup_agent:
+	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/genesis-agent dest=/usr/local/bin/genesis-agent"
+	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/genesis-agent"
+
+build_proxy: ${OUTPUT}
+	${GO_BIN} build \
+		-ldflags "-X k8s.io/component-base/version.gitVersion=v1.27.2-genesis" \
+		-o ${OUTPUT}/genesis-proxy cmd/genesis-proxy/main.go
+
+setup_proxy:
+	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/genesis-proxy dest=/usr/local/bin/genesis-proxy"
+	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/genesis-proxy"
 
 build_ctl: ${OUTPUT}
 	${GO_BIN} build -o ${OUTPUT}/genesisctl cmd/genesisctl/main.go 
+
+install_ctl: 
+	install -m0700 ${OUTPUT}/genesisctl /usr/local/bin
 
 build_appmanager: ${OUTPUT} 
 	${GO_BIN} build -o ${OUTPUT}/appmanager cmd/appmanager/main.go

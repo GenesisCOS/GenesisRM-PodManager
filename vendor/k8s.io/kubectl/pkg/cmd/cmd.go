@@ -28,7 +28,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	cliflag "k8s.io/component-base/cli/flag"
@@ -84,12 +83,16 @@ import (
 
 const kubectlCmdHeaders = "KUBECTL_COMMAND_HEADERS"
 
+var (
+	allowedCmdsSubcommandPlugin = map[string]struct{}{"create": {}}
+)
+
 type KubectlOptions struct {
 	PluginHandler PluginHandler
 	Arguments     []string
 	ConfigFlags   *genericclioptions.ConfigFlags
 
-	genericiooptions.IOStreams
+	genericclioptions.IOStreams
 }
 
 var defaultConfigFlags = genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag().WithDiscoveryBurst(300).WithDiscoveryQPS(50.0)
@@ -100,7 +103,7 @@ func NewDefaultKubectlCommand() *cobra.Command {
 		PluginHandler: NewDefaultPluginHandler(plugin.ValidPluginFilenamePrefixes),
 		Arguments:     os.Args,
 		ConfigFlags:   defaultConfigFlags,
-		IOStreams:     genericiooptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr},
+		IOStreams:     genericclioptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr},
 	})
 }
 
@@ -142,7 +145,7 @@ func NewDefaultKubectlCommandWithArgs(o KubectlOptions) *cobra.Command {
 			if cmdutil.CmdPluginAsSubcommand.IsEnabled() {
 				// Command exists(e.g. kubectl create), but it is not certain that
 				// subcommand also exists (e.g. kubectl create networkpolicy)
-				if IsSubcommandPluginAllowed(foundCmd.Name()) {
+				if _, ok := allowedCmdsSubcommandPlugin[foundCmd.Name()]; ok {
 					var subcommand string
 					for _, arg := range foundArgs { // first "non-flag" argument as subcommand
 						if !strings.HasPrefix(arg, "-") {
@@ -170,14 +173,6 @@ func NewDefaultKubectlCommandWithArgs(o KubectlOptions) *cobra.Command {
 	}
 
 	return cmd
-}
-
-// IsSubcommandPluginAllowed returns the given command is allowed
-// to use plugin as subcommand if the subcommand does not exist as builtin.
-func IsSubcommandPluginAllowed(foundCmd string) bool {
-	allowedCmds := map[string]struct{}{"create": {}}
-	_, ok := allowedCmds[foundCmd]
-	return ok
 }
 
 // PluginHandler is capable of parsing command line arguments

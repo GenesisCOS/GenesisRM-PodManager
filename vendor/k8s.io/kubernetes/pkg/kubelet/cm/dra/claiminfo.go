@@ -20,11 +20,9 @@ import (
 	"fmt"
 	"sync"
 
-	resourcev1alpha2 "k8s.io/api/resource/v1alpha2"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/kubelet/cm/dra/state"
-	"k8s.io/kubernetes/pkg/kubelet/cm/util/cdi"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 )
 
@@ -59,7 +57,7 @@ func (info *ClaimInfo) addCDIDevices(pluginName string, cdiDevices []string) err
 	// NOTE: Passing CDI device names as annotations is a temporary solution
 	// It will be removed after all runtimes are updated
 	// to get CDI device names from the ContainerConfig.CDIDevices field
-	annotations, err := cdi.GenerateAnnotations(info.ClaimUID, info.DriverName, cdiDevices)
+	annotations, err := generateCDIAnnotations(info.ClaimUID, info.DriverName, cdiDevices)
 	if err != nil {
 		return fmt.Errorf("failed to generate container annotations, err: %+v", err)
 	}
@@ -81,15 +79,14 @@ type claimInfoCache struct {
 	claimInfo map[string]*ClaimInfo
 }
 
-func newClaimInfo(driverName, className string, claimUID types.UID, claimName, namespace string, podUIDs sets.Set[string], resourceHandles []resourcev1alpha2.ResourceHandle) *ClaimInfo {
+func newClaimInfo(driverName, className string, claimUID types.UID, claimName, namespace string, podUIDs sets.Set[string]) *ClaimInfo {
 	claimInfoState := state.ClaimInfoState{
-		DriverName:      driverName,
-		ClassName:       className,
-		ClaimUID:        claimUID,
-		ClaimName:       claimName,
-		Namespace:       namespace,
-		PodUIDs:         podUIDs,
-		ResourceHandles: resourceHandles,
+		DriverName: driverName,
+		ClassName:  className,
+		ClaimUID:   claimUID,
+		ClaimName:  claimName,
+		Namespace:  namespace,
+		PodUIDs:    podUIDs,
 	}
 	claimInfo := ClaimInfo{
 		ClaimInfoState: claimInfoState,
@@ -122,7 +119,6 @@ func newClaimInfoCache(stateDir, checkpointName string) (*claimInfoCache, error)
 			entry.ClaimName,
 			entry.Namespace,
 			entry.PodUIDs,
-			entry.ResourceHandles,
 		)
 		for pluginName, cdiDevices := range entry.CDIDevices {
 			err := info.addCDIDevices(pluginName, cdiDevices)

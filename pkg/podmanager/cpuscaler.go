@@ -17,8 +17,9 @@ import (
 type CPUMetrics struct {
 	exist bool
 
-	PodMetrics *statsv1.Metrics
-	Timestamp  time.Time
+	PodMetrics     *statsv1.Metrics
+	PrevPodMetrics *statsv1.Metrics
+	Timestamp      time.Time
 
 	LastQuota    uint64
 	CurrentQuota uint64
@@ -33,6 +34,8 @@ type CPUMetrics struct {
 func NewCPUMetrics(maxLength int) *CPUMetrics {
 	return &CPUMetrics{
 		exist:               true,
+		PodMetrics:          nil,
+		PrevPodMetrics:      nil,
 		LastQuota:           0,
 		usageHistory:        sample.NewFixLengthSample(maxLength),
 		throttleRateHistory: sample.NewFixLengthSample(maxLength),
@@ -52,21 +55,40 @@ func NewCPUScaler(podmanager *PodManager) *CPUScaler {
 	}
 }
 
-var alpha float64 = 3
+var alpha float64 = 1
 var betaMax float64 = 0.9
 var betaMin float64 = 0.5
+
+func (s *CPUScaler) dynCalculateQuota2(metrics *CPUMetrics, throttleTarget float64) uint64 {
+	if metrics.PrevPodMetrics == nil {
+		return uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+	}
+	var nrPeriod uint64 = metrics.PodMetrics.CPU.Throttling.Periods - metrics.PrevPodMetrics.CPU.Throttling.Periods
+	quota := float64(nrPeriod * metrics.CurrentQuota)
+	var throttledTime uint64 = (metrics.PodMetrics.CPU.Throttling.ThrottledTime - metrics.PrevPodMetrics.CPU.Throttling.ThrottledTime) / 1000
+	var nrThread float64 = quota / float64(nrPeriod*types.DefaultCPUPeriod-throttledTime)
+	throttledRate := float64(throttledTime) / float64(nrPeriod*types.DefaultCPUPeriod)
+	newQuota := metrics.CurrentQuota
+	delta := int64(math.Ceil(float64(throttledRate-throttleTarget) * float64(types.DefaultCPUPeriod) * nrThread))
+	if delta > 0 {
+		newQuota += uint64(delta)
+	} else {
+		newQuota -= uint64(-delta)
+	}
+	klog.InfoS("return new quota", "quota", newQuota, "thread", nrThread, "rate", throttledRate)
+	return newQuota
+}
 
 func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float64) uint64 {
 	var quota float64
 	throttleRatio := metrics.throttleRateHistory.Last()
 	metrics.margin = max(0, metrics.margin+throttleRatio-throttleTarget)
 	if throttleRatio > alpha*throttleTarget { // scale up
+		currentQuota := float64(metrics.CurrentQuota) / float64(types.DefaultCPUPeriod)
 		if metrics.scaleDown {
 			lastQuota := float64(metrics.LastQuota) / float64(types.DefaultCPUPeriod)
-			quota = lastQuota + (lastQuota - quota)
-			metrics.margin = metrics.margin + throttleRatio - throttleTarget
+			quota = lastQuota + (lastQuota - currentQuota)
 		} else {
-			currentQuota := float64(metrics.CurrentQuota) / float64(types.DefaultCPUPeriod)
 			quota = currentQuota * (1 + throttleRatio - alpha*throttleTarget)
 		}
 		metrics.scaleDown = false
@@ -152,6 +174,31 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				s.cpuMetrics[key] = metrics
 			}
 
+			podMetrics, err := pInfo.Cgroup.Containerd.Stat()
+
+			if err != nil {
+				klog.ErrorS(err, "failed to stat")
+				s.cpuMetrics[key].PodMetrics = nil
+			} else {
+				prevPodMetrics := s.cpuMetrics[key].PodMetrics
+				prevTimestamp := s.cpuMetrics[key].Timestamp
+				timestamp := time.Now()
+				duration := timestamp.Sub(prevTimestamp).Nanoseconds()
+
+				if prevPodMetrics != nil {
+					throttlingRate := float64(podMetrics.CPU.Throttling.ThrottledPeriods-prevPodMetrics.CPU.Throttling.ThrottledPeriods) /
+						float64(podMetrics.CPU.Throttling.Periods-prevPodMetrics.CPU.Throttling.Periods)
+					s.cpuMetrics[key].throttleRateHistory.Update(throttlingRate)
+
+					usage := float64(podMetrics.CPU.Usage.Total-prevPodMetrics.CPU.Usage.Total) / float64(duration)
+					s.cpuMetrics[key].usageHistory.Update(usage)
+				}
+
+				s.cpuMetrics[key].Timestamp = timestamp
+				s.cpuMetrics[key].PrevPodMetrics = prevPodMetrics
+				s.cpuMetrics[key].PodMetrics = podMetrics
+			}
+
 			if metrics.LastQuota == 0 {
 				metrics.LastQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 				metrics.CurrentQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
@@ -166,36 +213,13 @@ func (s *CPUScaler) Start(ctx context.Context) {
 
 			} else if state == types.RCN || state == types.RLN { // Ready-CatNap Ready-LongNap
 				if endpoint == string(types.ENDPOINT_DOWN) {
-					quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
-					s.update(pInfo, quota, metrics, types.CPU_DYNAMIC_RESOURCE_EFFICIENT)
-				} else {
-					quota := s.dynCalculateQuota(metrics, throttleTarget)
+					// quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+					quota := s.dynCalculateQuota(metrics, 0.7)
 					s.update(pInfo, quota, metrics, types.CPU_MAX)
+				} else {
+					quota := s.dynCalculateQuota(metrics, 0.7)
+					s.update(pInfo, quota, metrics, types.CPU_DYNAMIC_RESOURCE_EFFICIENT)
 				}
-			}
-
-			podMetrics, err := pInfo.Cgroup.Containerd.Stat()
-
-			if err != nil {
-				klog.ErrorS(err, "failed to stat")
-				s.cpuMetrics[key].PodMetrics = nil
-			} else {
-				prevPodMetrics := s.cpuMetrics[key].PodMetrics
-				prevTimestamp := s.cpuMetrics[key].Timestamp
-				timestamp := time.Now()
-				duration := timestamp.Sub(prevTimestamp).Nanoseconds()
-
-				if prevPodMetrics != nil {
-					throttlingRate := float64(prevPodMetrics.CPU.Throttling.ThrottledPeriods-podMetrics.CPU.Throttling.ThrottledPeriods) /
-						float64(prevPodMetrics.CPU.Throttling.Periods-podMetrics.CPU.Throttling.Periods)
-					s.cpuMetrics[key].throttleRateHistory.Update(throttlingRate)
-
-					usage := float64(podMetrics.CPU.Usage.Total-prevPodMetrics.CPU.Usage.Total) / float64(duration)
-					s.cpuMetrics[key].usageHistory.Update(usage)
-				}
-
-				s.cpuMetrics[key].Timestamp = timestamp
-				s.cpuMetrics[key].PodMetrics = podMetrics
 			}
 		}
 

@@ -526,7 +526,10 @@ func (nim *nodeInfoManager) installDriverToCSINode(
 		return fmt.Errorf("error getting CSI client")
 	}
 
-	topologyKeys := sets.StringKeySet(topology)
+	topologyKeys := make(sets.String)
+	for k := range topology {
+		topologyKeys.Insert(k)
+	}
 
 	specModified := true
 	// Clone driver list, omitting the driver that matches the given driverName

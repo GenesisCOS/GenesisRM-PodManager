@@ -587,7 +587,7 @@ func (dsw *desiredStateOfWorld) GetVolumesToMount() []VolumeToMount {
 				},
 			}
 			if volumeObj.persistentVolumeSize != nil {
-				vmt.DesiredPersistentVolumeSize = volumeObj.persistentVolumeSize.DeepCopy()
+				vmt.PersistentVolumeSize = volumeObj.persistentVolumeSize.DeepCopy()
 			}
 			volumesToMount = append(volumesToMount, vmt)
 		}
