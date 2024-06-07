@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/cgroups/v3/cgroup2"
 	"github.com/moby/ipvs"
-	"github.com/opencontainers/runtime-spec/specs-go"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -247,16 +247,18 @@ func (c *PodManager) UpdatePodCPUResource(pInfo *PodInfo, quota uint64) (uint64,
 		quota = allocatable
 	}
 
-	fuckingInt64Quota := int64(quota)
+	int64Quota := int64(quota)
 
 	period := types.DefaultCPUPeriod
 	pInfo.PodResource.CPU.Quota = quota
-	err := pInfo.Cgroup.Containerd.Update(&specs.LinuxResources{
-		CPU: &specs.LinuxCPU{
-			Period: &period,
-			Quota:  &fuckingInt64Quota,
+	err := pInfo.Cgroup.Containerd.Update(&cgroup2.Resources{
+		CPU: &cgroup2.CPU{
+			Max: cgroup2.NewCPUMax(&int64Quota, &period),
 		},
 	})
+	if err != nil {
+		klog.ErrorS(err, "")
+	}
 
 	return quota, err
 }
@@ -413,7 +415,7 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 		return nil
 	}
 
-	podCgroup, err := cgroup.NewPodCgroup(pod)
+	podCgroup, err := cgroup.LoadPodCgroup(pod)
 	if err != nil {
 		klog.ErrorS(err, "failed to get pod cgroup")
 		c.PodMap.Delete(key)
@@ -424,7 +426,7 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 	containerInfos := make([]*ContainerInfo, 0)
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 
-		containerCgroup, err := cgroup.NewContainerCgroup(pod, &containerStatus)
+		containerCgroup, err := cgroup.LoadContainerCgroup(pod, &containerStatus)
 		if err != nil {
 			klog.ErrorS(err, "fail to get container cgroup")
 			c.PodMap.Delete(key)
@@ -469,124 +471,47 @@ func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
 		return nil, err
 	}
 
-	// memory.usage_in_bytes
-	podMemUsageInBytes, err := pInfo.Cgroup.GetMemoryUsageInBytes()
+	podCPUQuota, podCPUPeriod, err := pInfo.Cgroup.GetCPUQuotaAndPeriod()
 	if err != nil {
-		klog.ErrorS(err, "read memory.usage_in_bytes failed.")
 		return nil, err
 	}
 
-	podMemStat, err := pInfo.Cgroup.GetMemoryStat()
-	if err != nil {
-		klog.ErrorS(err, "read memory.stat failed.")
-		return nil, err
-	}
+	kubernetesContainerMetrics := make([]*KubernetesContainerMetrics, 0)
 
-	var podCPUQuota float64 = -1.0
-
-	// cpu.cfs_quota_us
-	podCFSQuota, err := pInfo.Cgroup.GetCFSQuota()
-	if err != nil {
-		klog.ErrorS(err, "read cpu.cfs_quota_us failed.")
-		return nil, err
-	}
-
-	if podCFSQuota != -1 {
-		// cpu.cfs_period_us
-		podCFSPeriod, err := pInfo.Cgroup.GetCFSPeriod()
-		if err != nil {
-			klog.ErrorS(err, "read cpu.cfs_period_us failed.")
-			return nil, err
-		}
-
-		podCPUQuota = float64(podCFSQuota) / float64(podCFSPeriod)
-	}
-
-	var containerCPUQuota float64 = 0.0
-	var containerMemLimitInBytes uint64 = 0
-	var containerMemStat *cgroup.CgMemoryStat = nil
-
-	// Container metrics
-	for _, containerInfo := range pInfo.ContainerInfos {
-		// cpu.cfs_quota_us
-		cfsQuotaUs, err := containerInfo.Cgroup.GetCFSQuota()
-		if err != nil {
-			klog.ErrorS(err, "read container cpu.cfs_quota_us failed.")
-			return nil, err
-		}
-
-		if cfsQuotaUs != -1 {
-			// cpu.cfs_period_us
-			cfsPeriodUs, err := containerInfo.Cgroup.GetCFSPeriod()
-			if err != nil {
-				klog.ErrorS(err, "read container cpu.cfs_period_us failed.")
-				return nil, err
-			}
-
-			containerCPUQuota += float64(cfsQuotaUs) / float64(cfsPeriodUs)
-		}
-
-		// memory.limit_in_bytes
-		perContainerMemLimitInBytes, err := containerInfo.Cgroup.GetMemoryLimitInBytes()
-		if err != nil {
-			klog.ErrorS(err, "read container memory.limit_in_bytes failed.")
-			return nil, err
-		}
-
-		// if not memory limit < 0 or memory limit > 512 GiB
-		if perContainerMemLimitInBytes > 0 && perContainerMemLimitInBytes < 549755813888 {
-			containerMemLimitInBytes += perContainerMemLimitInBytes
-		}
-
-		perContainerMemStat, err := containerInfo.Cgroup.GetMemoryStat()
-		if err != nil {
-			klog.ErrorS(err, "read container memory.stat failed.")
-			return nil, err
-		}
-
-		if containerMemStat == nil {
-			containerMemStat = perContainerMemStat
-		} else {
-			containerMemStat.Add(perContainerMemStat)
-		}
-	}
-
-	var memRequest int64 = 0
-	var cpuRequest int64 = 0
-	var memLimit int64 = 0
-	var cpuLimit int64 = 0
+	var totalMemRequest int64 = 0
+	var totalCPURequest int64 = 0
+	var totalMemLimit int64 = 0
+	var totalCPULimit int64 = 0
 
 	for _, container := range pInfo.Pod.Spec.Containers {
-		memRequest += container.Resources.Requests.Memory().Value()
-		cpuRequest += container.Resources.Requests.Cpu().MilliValue()
-		memLimit += container.Resources.Limits.Memory().Value()
-		cpuLimit += container.Resources.Limits.Cpu().MilliValue()
-	}
+		cm := &KubernetesContainerMetrics{
+			CPURequest: container.Resources.Requests.Cpu().MilliValue(),
+			CPULimit:   container.Resources.Limits.Cpu().MilliValue(),
+			MemRequest: container.Resources.Requests.Memory().Value(),
+			MemLimit:   container.Resources.Limits.Memory().Value(),
+		}
+		totalMemRequest += container.Resources.Requests.Memory().Value()
+		totalCPURequest += container.Resources.Requests.Cpu().MilliValue()
+		totalMemLimit += container.Resources.Limits.Memory().Value()
+		totalCPULimit += container.Resources.Limits.Cpu().MilliValue()
 
-	var memAllocated int64 = 0
-	var cpuAllocated int64 = 0
-
-	for _, containerStatus := range pInfo.Pod.Status.ContainerStatuses {
-		cpuAllocated += containerStatus.AllocatedResources.Cpu().MilliValue()
-		memAllocated += containerStatus.AllocatedResources.Memory().Value()
+		kubernetesContainerMetrics = append(kubernetesContainerMetrics, cm)
 	}
 
 	timestamp := time.Now()
 
 	return &PodMetrics{
-		CPUUsage:          metrics.CPU.Usage.Total,
-		CPUQuota:          containerCPUQuota,
-		PodCPUQuota:       podCPUQuota,
-		MemUsageInBytes:   podMemUsageInBytes,
-		MemLimitInBytes:   containerMemLimitInBytes,
-		PodMemStat:        podMemStat,
-		ContainerMemStat:  containerMemStat,
-		MemRequest:        memRequest,
-		CPURequest:        cpuRequest,
-		MemLimit:          memLimit,
-		CPULimit:          cpuLimit,
-		MemAllocated:      memAllocated,
-		CPUAllocated:      cpuAllocated,
+		PodCPUQuota:  podCPUQuota,
+		PodCPUPeriod: podCPUPeriod,
+
+		Kubernetes: &KubernetesPodMetrics{
+			containers:      kubernetesContainerMetrics,
+			TotalCPURequest: totalCPURequest,
+			TotalCPULimit:   totalCPULimit,
+			TotalMemRequest: totalMemRequest,
+			TotalMemLimit:   totalMemLimit,
+		},
+
 		timestamp:         timestamp,
 		ContainerdMetrics: metrics,
 	}, nil

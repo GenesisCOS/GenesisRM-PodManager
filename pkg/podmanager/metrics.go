@@ -3,28 +3,35 @@ package podmanager
 import (
 	"time"
 
-	statsv1 "github.com/containerd/cgroups/stats/v1"
-	cgroup "swiftkube.io/swiftkube/pkg/cgroup"
+	stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 )
 
+type KubernetesContainerMetrics struct {
+	CPURequest int64
+	CPULimit   int64
+
+	MemRequest int64
+	MemLimit   int64
+}
+
+type KubernetesPodMetrics struct {
+	containers []*KubernetesContainerMetrics
+
+	TotalCPURequest int64
+	TotalCPULimit   int64
+
+	TotalMemRequest int64
+	TotalMemLimit   int64
+}
+
 type PodMetrics struct {
-	CPUUsage         uint64
-	CPUQuota         float64
-	PodCPUQuota      float64
-	MemUsageInBytes  uint64
-	MemLimitInBytes  uint64
-	PodMemStat       *cgroup.CgMemoryStat
-	ContainerMemStat *cgroup.CgMemoryStat
-	CPURequest       int64
-	CPULimit         int64
-	CPUAllocated     int64
-	MemRequest       int64
-	MemLimit         int64
-	MemAllocated     int64
+	PodCPUQuota  int64
+	PodCPUPeriod uint64
 
-	timestamp time.Time
+	Kubernetes *KubernetesPodMetrics
+	timestamp  time.Time
 
-	ContainerdMetrics *statsv1.Metrics
+	ContainerdMetrics *stats.Metrics
 }
 
 type NodeMetrics struct {

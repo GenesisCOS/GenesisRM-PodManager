@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	statsv1 "github.com/containerd/cgroups/stats/v1"
+	statsv1 "github.com/containerd/cgroups/v3/cgroup2/stats"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
@@ -27,18 +27,18 @@ type CPUMetrics struct {
 	scaleDown bool
 	margin    float64
 
-	usageHistory        sample.Sample
-	throttleRateHistory sample.Sample
+	usageHistory          sample.Sample
+	throttlingRateHistory sample.Sample
 }
 
 func NewCPUMetrics(maxLength int) *CPUMetrics {
 	return &CPUMetrics{
-		exist:               true,
-		PodMetrics:          nil,
-		PrevPodMetrics:      nil,
-		LastQuota:           0,
-		usageHistory:        sample.NewFixLengthSample(maxLength),
-		throttleRateHistory: sample.NewFixLengthSample(maxLength),
+		exist:                 true,
+		PodMetrics:            nil,
+		PrevPodMetrics:        nil,
+		LastQuota:             0,
+		usageHistory:          sample.NewFixLengthSample(maxLength),
+		throttlingRateHistory: sample.NewFixLengthSample(maxLength),
 	}
 }
 
@@ -55,33 +55,22 @@ func NewCPUScaler(podmanager *PodManager) *CPUScaler {
 	}
 }
 
+func calculateThrottlingRate(cur, prev *statsv1.Metrics) float64 {
+	return float64(cur.GetCPU().GetNrThrottled()-prev.GetCPU().GetNrThrottled()) /
+		float64(cur.GetCPU().GetNrPeriods()-prev.GetCPU().GetNrPeriods())
+}
+
+func calculateUsage(cur, prev *statsv1.Metrics, durationUsec int64) float64 {
+	return float64(cur.GetCPU().GetUsageUsec()-prev.GetCPU().GetUsageUsec()) / float64(durationUsec)
+}
+
 var alpha float64 = 1
 var betaMax float64 = 0.9
 var betaMin float64 = 0.5
 
-func (s *CPUScaler) dynCalculateQuota2(metrics *CPUMetrics, throttleTarget float64) uint64 {
-	if metrics.PrevPodMetrics == nil {
-		return uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
-	}
-	var nrPeriod uint64 = metrics.PodMetrics.CPU.Throttling.Periods - metrics.PrevPodMetrics.CPU.Throttling.Periods
-	quota := float64(nrPeriod * metrics.CurrentQuota)
-	var throttledTime uint64 = (metrics.PodMetrics.CPU.Throttling.ThrottledTime - metrics.PrevPodMetrics.CPU.Throttling.ThrottledTime) / 1000
-	var nrThread float64 = quota / float64(nrPeriod*types.DefaultCPUPeriod-throttledTime)
-	throttledRate := float64(throttledTime) / float64(nrPeriod*types.DefaultCPUPeriod)
-	newQuota := metrics.CurrentQuota
-	delta := int64(math.Ceil(float64(throttledRate-throttleTarget) * float64(types.DefaultCPUPeriod) * nrThread))
-	if delta > 0 {
-		newQuota += uint64(delta)
-	} else {
-		newQuota -= uint64(-delta)
-	}
-	klog.InfoS("return new quota", "quota", newQuota, "thread", nrThread, "rate", throttledRate)
-	return newQuota
-}
-
 func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float64) uint64 {
 	var quota float64
-	throttleRatio := metrics.throttleRateHistory.Last()
+	throttleRatio := metrics.throttlingRateHistory.Last()
 	metrics.margin = max(0, metrics.margin+throttleRatio-throttleTarget)
 	if throttleRatio > alpha*throttleTarget { // scale up
 		currentQuota := float64(metrics.CurrentQuota) / float64(types.DefaultCPUPeriod)
@@ -183,20 +172,25 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				prevPodMetrics := s.cpuMetrics[key].PodMetrics
 				prevTimestamp := s.cpuMetrics[key].Timestamp
 				timestamp := time.Now()
-				duration := timestamp.Sub(prevTimestamp).Nanoseconds()
+				durationUsec := timestamp.Sub(prevTimestamp).Microseconds()
 
 				if prevPodMetrics != nil {
-					throttlingRate := float64(podMetrics.CPU.Throttling.ThrottledPeriods-prevPodMetrics.CPU.Throttling.ThrottledPeriods) /
-						float64(podMetrics.CPU.Throttling.Periods-prevPodMetrics.CPU.Throttling.Periods)
-					s.cpuMetrics[key].throttleRateHistory.Update(throttlingRate)
+					// throttling rate (nr_throttled / nr_period)
+					throttlingRate := calculateThrottlingRate(podMetrics, prevPodMetrics)
+					s.cpuMetrics[key].throttlingRateHistory.Update(throttlingRate)
 
-					usage := float64(podMetrics.CPU.Usage.Total-prevPodMetrics.CPU.Usage.Total) / float64(duration)
+					// CPU total usage
+					usage := calculateUsage(podMetrics, prevPodMetrics, durationUsec)
 					s.cpuMetrics[key].usageHistory.Update(usage)
 				}
 
 				s.cpuMetrics[key].Timestamp = timestamp
 				s.cpuMetrics[key].PrevPodMetrics = prevPodMetrics
 				s.cpuMetrics[key].PodMetrics = podMetrics
+
+				if prevPodMetrics == nil {
+					continue // 处理下一个Pod
+				}
 			}
 
 			if metrics.LastQuota == 0 {
@@ -213,18 +207,17 @@ func (s *CPUScaler) Start(ctx context.Context) {
 
 			} else if state == types.RCN || state == types.RLN { // Ready-CatNap Ready-LongNap
 				if endpoint == string(types.ENDPOINT_DOWN) {
-					// quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 					quota := s.dynCalculateQuota(metrics, 0.7)
 					s.update(pInfo, quota, metrics, types.CPU_MAX)
 				} else {
-					quota := s.dynCalculateQuota(metrics, 0.7)
+					quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+					// quota := s.dynCalculateQuota(metrics, 0.7)
 					s.update(pInfo, quota, metrics, types.CPU_DYNAMIC_RESOURCE_EFFICIENT)
 				}
 			}
 		}
 
 		s.cleanupMetrics()
-
 		<-timer.C
 	}
 }

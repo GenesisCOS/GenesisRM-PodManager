@@ -3,6 +3,7 @@ module swiftkube.io/swiftkube
 go 1.21
 
 replace (
+	golang.org/x/sys => golang.org/x/sys v0.6.0
 	k8s.io/apiserver => k8s.io/apiserver v0.27.2
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.27.2
 	k8s.io/controller-manager => k8s.io/controller-manager v0.27.2
@@ -15,10 +16,9 @@ replace (
 )
 
 require (
-	github.com/containerd/cgroups v1.1.0
+	github.com/containerd/cgroups/v3 v3.0.3
 	github.com/emicklei/go-restful/v3 v3.12.0
 	github.com/moby/ipvs v1.1.0
-	github.com/opencontainers/runtime-spec v1.2.0
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
 	gonum.org/v1/gonum v0.15.0
@@ -31,6 +31,8 @@ require (
 	k8s.io/kubectl v0.27.2
 	k8s.io/kubernetes v1.27.2
 )
+
+require github.com/containerd/cgroups v1.0.1 // indirect
 
 require (
 	cloud.google.com/go v0.97.0 // indirect
@@ -60,7 +62,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/chai2010/gettext-go v1.0.2 // indirect
 	github.com/checkpoint-restore/go-criu/v5 v5.3.0 // indirect
-	github.com/cilium/ebpf v0.9.1 // indirect
+	github.com/cilium/ebpf v0.11.0 // indirect
 	github.com/container-storage-interface/spec v1.7.0 // indirect
 	github.com/containerd/console v1.0.3 // indirect
 	github.com/containerd/ttrpc v1.1.0 // indirect
@@ -130,6 +132,7 @@ require (
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/runc v1.1.6 // indirect
+	github.com/opencontainers/runtime-spec v1.0.3-0.20220909204839-494a5a6aca78 // indirect
 	github.com/opencontainers/selinux v1.10.0 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -167,10 +170,11 @@ require (
 	go.uber.org/multierr v1.6.0 // indirect
 	go.uber.org/zap v1.19.0 // indirect
 	golang.org/x/crypto v0.1.0 // indirect
+	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
 	golang.org/x/net v0.8.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20220223155221-ee480838109b // indirect
 	golang.org/x/sync v0.1.0 // indirect
-	golang.org/x/sys v0.6.0 // indirect
+	golang.org/x/sys v0.14.0 // indirect
 	golang.org/x/term v0.6.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect

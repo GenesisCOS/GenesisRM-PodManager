@@ -5,27 +5,6 @@ import (
 	"net/http"
 )
 
-const (
-	cgroupPodCPUQuotaName  = "swiftmonitor_cgroup_pod_cpu_quota"
-	cgroupCPUQuotaName     = "swiftmonitor_cgroup_cpu_quota"
-	cgroupCPUAcctUsageName = "swiftmonitor_cgroup_cpuacct_usage"
-
-	containerdPodCPUUsage  = "swiftmonitor_containerd_pod_cpu_usage"
-	containerdPodMemoryRSS = "swiftmonitor_containerd_pod_memory_rss"
-
-	cgroupMemStatUsageInBytesName = "swiftmonitor_cgroup_memory_stat_usage_in_bytes" // Read from memory.stat (cache + rss).
-	cgroupMemStatSwapInBytesName  = "swiftmonitor_cgroup_memory_stat_swap_in_bytes"
-	cgroupMemStatRssInBytesName   = "swiftmonitor_cgroup_memory_stat_rss_in_bytes"
-	cgroupMemStatCacheInBytesName = "swiftmonitor_cgroup_memory_stat_cache_in_bytes"
-
-	swiftMonitorK8sPodMemoryRequest   = "swiftmonitor_pod_memory_request"
-	swiftMonitorK8sPodCpuRequest      = "swiftmonitor_pod_cpu_request"
-	swiftMonitorK8sPodMemoryLimit     = "swiftmonitor_pod_memory_limit"
-	swiftMonitorK8sPodCpuLimit        = "swiftmonitor_pod_cpu_limit"
-	swiftMonitorK8sPodCpuAllocated    = "swiftmonitor_pod_cpu_allocated"
-	swiftMonitorK8sPodMemoryAllocated = "swiftmonitor_pod_memory_allocated"
-)
-
 type Monitor struct {
 	manager *PodManager
 }
@@ -41,59 +20,50 @@ func (c *Monitor) parsePodMetricsResponse(pInfo *PodInfo, v *PodMetrics) []byte 
 	if pInfo.Pod == nil {
 		return []byte("")
 	}
-	if v.ContainerMemStat == nil {
-		return []byte("")
-	}
+
 	state, ok := pInfo.Pod.GetLabels()["swiftkube.io/state"]
 	if !ok {
 		state = "None"
 	}
 
-	// cgroup CPU quotas
-	out := fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		cgroupCPUAcctUsageName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPUUsage)
+	out := ""
 
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %f\n",
-		cgroupCPUQuotaName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPUQuota)
+	// CPU
+	out += fmt.Sprintf("swiftmonitor_pod_cpu_period{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.PodCPUPeriod)
 
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %f\n",
-		cgroupPodCPUQuotaName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.PodCPUQuota)
+	out += fmt.Sprintf("swiftmonitor_pod_cpu_quota{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.PodCPUQuota)
 
-	// Container memory.stat
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		cgroupMemStatUsageInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.RSS+v.ContainerMemStat.Cache)
+	// Memory
+	out += fmt.Sprintf("swiftmonitor_pod_memory_stat_swap_usage{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerdMetrics.GetMemory().GetSwapUsage())
 
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		cgroupMemStatSwapInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.Swap)
-
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		cgroupMemStatRssInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.RSS)
-
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		cgroupMemStatCacheInBytesName, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerMemStat.Cache)
+	out += fmt.Sprintf("swiftmonitor_pod_memory_stat_anon{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerdMetrics.GetMemory().GetAnon())
 
 	// K8s stats
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		swiftMonitorK8sPodMemoryRequest, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.MemRequest)
+	out += fmt.Sprintf("swiftmonitor_pod_total_memory_request{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.Kubernetes.TotalMemRequest)
 
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		swiftMonitorK8sPodCpuRequest, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPURequest)
+	out += fmt.Sprintf("swiftmonitor_pod_total_cpu_request{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.Kubernetes.TotalCPURequest)
 
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		swiftMonitorK8sPodMemoryLimit, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.MemLimit)
+	out += fmt.Sprintf("swiftmonitor_pod_total_memory_limit{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.Kubernetes.TotalMemLimit)
 
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		swiftMonitorK8sPodCpuLimit, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPULimit)
-
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		swiftMonitorK8sPodCpuAllocated, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.CPUAllocated)
-
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		swiftMonitorK8sPodMemoryAllocated, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.MemAllocated)
+	out += fmt.Sprintf("swiftmonitor_pod_total_cpu_limit{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.Kubernetes.TotalCPULimit)
 
 	// Containerd
-	out += fmt.Sprintf("%s{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
-		containerdPodCPUUsage, pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerdMetrics.CPU.Usage.Total)
+	out += fmt.Sprintf("swiftmonitor_pod_cpu_usage{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerdMetrics.GetCPU().GetUsageUsec())
+
+	out += fmt.Sprintf("swiftmonitor_pod_cpu_throttled{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerdMetrics.GetCPU().GetThrottledUsec())
+
+	out += fmt.Sprintf("swiftmonitor_pod_cpu_nr_throttled{podname=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+		pInfo.Pod.Name, pInfo.Pod.Namespace, state, v.ContainerdMetrics.GetCPU().GetNrThrottled())
 
 	return []byte(out)
 }
