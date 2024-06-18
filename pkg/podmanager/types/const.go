@@ -1,30 +1,42 @@
 package types
 
-type PodState = string
-type CPUState = string
-type MemoryState = string
-type EndpointState = string
+type PodState string
+
+func (ps PodState) String() string {
+	return string(ps)
+}
+
+type PodCPUState string
+type PodMemoryState string
+type PodEndpointState string
 
 const (
-	CPU_UNKNOWN                    CPUState = "unknown"
-	CPU_DYNAMIC_OVERPROVISION      CPUState = "dynamic-overprovision"
-	CPU_DYNAMIC_RESOURCE_EFFICIENT CPUState = "dynamic-resource-efficient"
-	CPU_MAX                        CPUState = "cpu-max"
+	CPU_UNKNOWN                    PodCPUState = "unknown"
+	CPU_DYNAMIC_OVERPROVISION      PodCPUState = "dynamic-overprovision"
+	CPU_DYNAMIC_RESOURCE_EFFICIENT PodCPUState = "dynamic-resource-efficient"
+	CPU_MAX                        PodCPUState = "cpu-max"
 
-	MEMORY_UNKNOWN MemoryState = "unknown"
-	MEMORY_SWAPPED MemoryState = "mem-swapped"
-	MEMORY_MAX     MemoryState = "mem-max"
+	MEMORY_UNKNOWN PodMemoryState = "unknown"
+	MEMORY_SWAPPED PodMemoryState = "mem-swapped"
+	MEMORY_MAX     PodMemoryState = "mem-max"
 
-	POD_READY_FULLSPEED PodState = "Ready-FullSpeed"
-	POD_READY_RUNNING   PodState = "Ready-Running"
-	POD_READY_CATNAP    PodState = "Ready-CatNap"
-	POD_READY_LONGNAP   PodState = "Ready-LongNap"
-	POD_INITIALIZING    PodState = "Initializing"
-	POD_WARMINGUP       PodState = "WarmingUp"
+	POD_READY_FULLSPEED_STATE PodState = "Ready-FullSpeed"
+	POD_READY_RUNNING_STATE   PodState = "Ready-Running"
+	POD_READY_CATNAP_STATE    PodState = "Ready-CatNap"
+	POD_READY_LONGNAP_STATE   PodState = "Ready-LongNap"
+	POD_INITIALIZING_STATE    PodState = "Initializing"
+	POD_WARMINGUP_STATE       PodState = "WarmingUp"
+	POD_UNKNOWN_STATE         PodState = "Unknown"
 
-	ENDPOINT_UP   EndpointState = "Up"
-	ENDPOINT_DOWN EndpointState = "Down"
+	ENDPOINT_UP   PodEndpointState = "Up"
+	ENDPOINT_DOWN PodEndpointState = "Down"
 )
+
+type PodServiceType string
+
+func (st PodServiceType) String() string {
+	return string(st)
+}
 
 const (
 	DefaultCPUPeriod   uint64  = 100000 // us
@@ -41,6 +53,19 @@ const (
 	DefaultMaxHistoryLength = 20
 	DefaultMinHistoryLength = 10
 
-	STATE_LABEL    = "swiftkube.io/state"
-	ENDPOINT_LABEL = "swiftkube.io/endpoint"
+	ENABLED_LABEL             = "swiftkube.io/enabled"
+	STATE_LABEL               = "swiftkube.io/state"
+	ENDPOINT_LABEL            = "swiftkube.io/endpoint"
+	SERVICE_TYPE_LABEL        = "swiftkube.io/service-type"
+	CPUSET_LABEL              = "swiftkube.io/cpuset"
+	CPU_THROTTLE_TARGET_LABEL = "swiftkube.io/throttle-target"
+
+	SERVICE_TYPE_LC      PodServiceType = "lc-service"
+	SERVICE_TYPE_BE      PodServiceType = "be-service"
+	SERVICE_TYPE_UNKNOWN PodServiceType = "unknown-service"
+
+	CPUSET_LC      = "lc-cpuset"
+	CPUSET_BE      = "be-cpuset"
+	CPUSET_MIX     = "mix-cpuset"
+	CPUSET_UNKNOWN = "unknown-cpuset"
 )

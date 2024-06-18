@@ -2,8 +2,8 @@ package podmanager
 
 import (
 	"context"
+	"fmt"
 	"math"
-	"strconv"
 	"time"
 
 	statsv1 "github.com/containerd/cgroups/v3/cgroup2/stats"
@@ -92,26 +92,19 @@ func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float6
 		metrics.scaleDown = true
 	}
 	quota = max(quota, types.DefaultMinCPULimit)
-	quota = min(quota, types.DefaultMaxCPULimit)
 	return uint64(math.Ceil(quota * float64(types.DefaultCPUPeriod)))
 }
 
-func (s *CPUScaler) update(pInfo *PodInfo, quota uint64, metrics *CPUMetrics, state types.CPUState) {
-	_quota, err := s.podmanager.UpdatePodCPUResource(pInfo, quota)
+func (s *CPUScaler) update(pInfo *PodInfo, quota uint64, metrics *CPUMetrics, state types.PodCPUState, ignoreResourcePool bool) {
+	err := s.podmanager.UpdatePodCPUQuota(pInfo, quota, ignoreResourcePool)
 	if err != nil {
 		klog.ErrorS(err, "failed to update resource")
-	}
-
-	if _quota != quota {
-		klog.Warningf("request quota=%d, got quota=%d",
-			quota, _quota,
-		)
 	}
 
 	pInfo.CPUState = state
 
 	metrics.LastQuota = metrics.CurrentQuota
-	metrics.CurrentQuota = _quota
+	metrics.CurrentQuota = quota
 }
 
 func (s *CPUScaler) cleanupMetrics() {
@@ -128,6 +121,15 @@ func (s *CPUScaler) cleanupMetrics() {
 	}
 }
 
+type updateAction struct {
+	pInfo              *PodInfo
+	quota              uint64
+	metrics            *CPUMetrics
+	state              types.PodCPUState
+	ignoreResourcePool bool
+	cpuset             string
+}
+
 func (s *CPUScaler) Start(ctx context.Context) {
 
 	klog.InfoS("CPU Scaler started")
@@ -135,7 +137,18 @@ func (s *CPUScaler) Start(ctx context.Context) {
 
 	for {
 		timer.Reset(time.Second)
-		localPods := s.podmanager.ListLocalPods()
+		localPods, err := s.podmanager.ListControlledLocalPods()
+		if err != nil {
+			klog.Error(err)
+			<-timer.C
+			continue
+		}
+
+		// 包含LC Pod和LC Mix Pod的UpdateAction
+		updateActions := make([]*updateAction, 0)
+		bePods := make([]*PodInfo, 0)
+		lcMixPods := make([]*PodInfo, 0)
+		beMixPods := make([]*PodInfo, 0)
 
 		for _, pod := range localPods {
 
@@ -146,13 +159,54 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				continue
 			}
 
+			serviceType := GetServiceType(pInfo.Pod)
+			cpuset, ok := pod.GetLabels()[types.CPUSET_LABEL]
+			if !ok {
+				if serviceType == types.SERVICE_TYPE_BE {
+					cpuset = types.CPUSET_BE
+				} else if serviceType == types.SERVICE_TYPE_LC {
+					cpuset = types.CPUSET_LC
+				} else {
+					klog.ErrorS(fmt.Errorf("unknown service types %s", serviceType), "", "pod", pod.GetName(), "namespace", pod.GetNamespace())
+					continue
+				}
+			}
+
 			state := pod.GetLabels()[types.STATE_LABEL]
 			endpoint := pod.GetLabels()[types.ENDPOINT_LABEL]
-			throttleTarget, err := strconv.ParseFloat(pod.GetLabels()["swiftkube.io/throttle-target"], 64)
-			if err != nil {
-				throttleTarget = 0.1
-				klog.ErrorS(err, "failed to parse throttle target to float64")
+
+			// 不去计算BE任务的CPU quota
+			if serviceType == types.SERVICE_TYPE_BE {
+				delete(s.cpuMetrics, key)
+				if cpuset == types.CPUSET_BE {
+					bePods = append(bePods, pInfo)
+				} else if cpuset == types.CPUSET_MIX {
+					beMixPods = append(beMixPods, pInfo)
+				}
+				continue
 			}
+
+			if cpuset == types.CPUSET_MIX {
+				lcMixPods = append(lcMixPods, pInfo)
+			}
+
+			// 把CPU request作为最高CPU quota
+			var totalCPURequest float64 = 0
+			for _, container := range pInfo.Pod.Spec.Containers {
+				totalCPURequest += float64(container.Resources.Requests.Cpu().MilliValue())
+			}
+			maxCPUQuota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * (totalCPURequest / 1000)))
+
+			// 是否所有容器都ready了
+			allReady := true
+			for _, containerStatus := range pInfo.Pod.Status.ContainerStatuses {
+				if !containerStatus.Ready {
+					allReady = false
+					break
+				}
+			}
+
+			throttleTarget := GetThrottleTarget(pInfo.Pod)
 
 			var metrics *CPUMetrics
 			if m, ok := s.cpuMetrics[key]; ok {
@@ -163,7 +217,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				s.cpuMetrics[key] = metrics
 			}
 
-			podMetrics, err := pInfo.Cgroup.Containerd.Stat()
+			podMetrics, err := pInfo.Cgroup.Control.Stat()
 
 			if err != nil {
 				klog.ErrorS(err, "failed to stat")
@@ -197,25 +251,146 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				metrics.LastQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 				metrics.CurrentQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 			}
-			if state == types.RR { // Ready-Running
-				quota := s.dynCalculateQuota(metrics, throttleTarget)
-				s.update(pInfo, quota, metrics, types.CPU_DYNAMIC_OVERPROVISION)
 
-			} else if state == types.Init || state == types.WU || state == types.RFS { // Initializing WarmingUp Ready-FullSpeed
-				quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
-				s.update(pInfo, quota, metrics, types.CPU_MAX)
+			if cpuset == types.CPUSET_MIX {
+				quota := maxCPUQuota
+				updateActions = append(updateActions, &updateAction{
+					pInfo:              pInfo,
+					quota:              quota,
+					metrics:            metrics,
+					state:              types.CPU_MAX,
+					ignoreResourcePool: false,
+					cpuset:             cpuset,
+				})
+				continue
+			}
 
-			} else if state == types.RCN || state == types.RLN { // Ready-CatNap Ready-LongNap
-				if endpoint == string(types.ENDPOINT_DOWN) {
-					quota := s.dynCalculateQuota(metrics, 0.7)
-					s.update(pInfo, quota, metrics, types.CPU_MAX)
-				} else {
+			if allReady {
+				if state == types.RR { // Ready-Running
+					quota := s.dynCalculateQuota(metrics, throttleTarget)
+					quota = min(maxCPUQuota, quota)
+					updateActions = append(updateActions, &updateAction{
+						pInfo:              pInfo,
+						quota:              quota,
+						metrics:            metrics,
+						state:              types.CPU_DYNAMIC_OVERPROVISION,
+						ignoreResourcePool: false,
+						cpuset:             cpuset,
+					})
+
+				} else if state == types.Init || state == types.WU { // Initializing WarmingUp Ready-FullSpeed
 					quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
-					// quota := s.dynCalculateQuota(metrics, 0.7)
-					s.update(pInfo, quota, metrics, types.CPU_DYNAMIC_RESOURCE_EFFICIENT)
+					updateActions = append(updateActions, &updateAction{
+						pInfo:              pInfo,
+						quota:              quota,
+						metrics:            metrics,
+						state:              types.CPU_MAX,
+						ignoreResourcePool: true,
+						cpuset:             cpuset,
+					})
+
+				} else if state == types.RFS {
+					quota := maxCPUQuota
+					updateActions = append(updateActions, &updateAction{
+						pInfo:              pInfo,
+						quota:              quota,
+						metrics:            metrics,
+						state:              types.CPU_MAX,
+						ignoreResourcePool: false,
+						cpuset:             cpuset,
+					})
+
+				} else if state == types.RCN || state == types.RLN { // Ready-CatNap Ready-LongNap
+					if endpoint == string(types.ENDPOINT_DOWN) {
+						quota := s.dynCalculateQuota(metrics, 0.7)
+						quota = min(maxCPUQuota, quota)
+						updateActions = append(updateActions, &updateAction{
+							pInfo:              pInfo,
+							quota:              quota,
+							metrics:            metrics,
+							state:              types.CPU_DYNAMIC_RESOURCE_EFFICIENT,
+							ignoreResourcePool: false,
+							cpuset:             cpuset,
+						})
+					} else {
+						quota := maxCPUQuota
+						updateActions = append(updateActions, &updateAction{
+							pInfo:              pInfo,
+							quota:              quota,
+							metrics:            metrics,
+							state:              types.CPU_MAX,
+							ignoreResourcePool: false,
+							cpuset:             cpuset,
+						})
+					}
 				}
+			} else {
+				// 如果Pod中存在容器没有ready，我们希望容器能够快速完成初始化
+				quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+				updateActions = append(updateActions, &updateAction{
+					pInfo:              pInfo,
+					quota:              quota,
+					metrics:            metrics,
+					state:              types.CPU_MAX,
+					ignoreResourcePool: true,
+					cpuset:             cpuset,
+				})
 			}
 		}
+
+		var totalRequestLCCores float64 = 0
+		var totalRequestMixCores float64 = 0
+		for _, action := range updateActions {
+			requestCores := float64(action.quota) / float64(types.DefaultCPUPeriod)
+			if action.cpuset == types.CPUSET_MIX {
+				totalRequestMixCores += requestCores
+				continue
+			}
+			totalRequestLCCores += requestCores
+		}
+
+		if totalRequestLCCores > float64(s.podmanager.Cores) {
+			totalRequestLCCores = float64(s.podmanager.Cores)
+		}
+
+		totalRequestLCCoresInt := uint64(math.Ceil(totalRequestLCCores))
+		// update LC pods cpu resources
+		for _, action := range updateActions {
+			s.update(action.pInfo, action.quota, action.metrics, action.state, action.ignoreResourcePool)
+			if action.cpuset == types.CPUSET_LC {
+				s.podmanager.UpdatePodCPUSetFromLower(action.pInfo, totalRequestLCCoresInt)
+			}
+		}
+
+		// 混部区域，该cpuset即存在LC任务也存在BE任务
+		totalRequestMixCoresInt := uint64(math.Ceil(totalRequestMixCores))
+		rangeStart := totalRequestLCCoresInt
+		rangeEnd := min(s.podmanager.Cores, totalRequestLCCoresInt+totalRequestMixCoresInt-1)
+		for _, pod := range lcMixPods {
+			if rangeStart == rangeEnd {
+				s.podmanager.UpdatePodCPUSetFromLower(pod, totalRequestLCCoresInt)
+			} else {
+				s.podmanager.UpdatePodCPUSetRange(pod, rangeStart, rangeEnd)
+			}
+		}
+
+		// update BE pods cpu resources
+		beCores := s.podmanager.Cores - totalRequestLCCoresInt - totalRequestMixCoresInt
+		beCores = max(beCores, 2) // 最少分配2核
+
+		for _, beMixPod := range beMixPods {
+			if rangeStart == rangeEnd {
+				s.podmanager.UpdatePodCPUSetFromUpper(beMixPod, beCores)
+			} else {
+				s.podmanager.UpdatePodCPUSetRange(beMixPod, rangeStart, rangeEnd)
+			}
+		}
+
+		for _, bePod := range bePods {
+			s.podmanager.UpdatePodCPUSetFromUpper(bePod, beCores)
+		}
+
+		//klog.InfoS("cpusets", "LC", totalRequestLCCoresInt, "MIX", totalRequestMixCoresInt, "BE", beCores)
 
 		s.cleanupMetrics()
 		<-timer.C

@@ -1,0 +1,15 @@
+[Unit]
+Description=GenesisRM PodManager 
+After=network-online.target 
+
+[Service]
+Type=simple 
+ExecStart=/usr/local/bin/podmanager 
+KillMode=process
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target 
+
+

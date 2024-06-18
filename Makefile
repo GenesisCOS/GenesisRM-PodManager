@@ -76,26 +76,16 @@ install_all: create_serviceaccount
 install_monitor: create_serviceaccount
 	kubectl apply -f kubernetes/swift-monitor.yaml 
 
-push_podmanager:
+push_podmanager: build_podmanager 
 	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
-	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
+	ansible myhosts -i ansible.ini -m copy -a "src=podmanager.service dest=/usr/lib/systemd/system/podmanager.service"
+	ansible myhosts -i ansible.ini -m shell -a "systemctl daemon-reload && chmod +x /usr/local/bin/podmanager"
 
-setup_podmanager:
-	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager'"
-
-resetup_podmanager: build_podmanager 
-	-ansible myhosts -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
-	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
-	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
-	ansible myhosts -i ansible.ini -m shell -a "tmux new-session -s podmanager -d 'podmanager'"
-
-resetup_podmanager_916: build_podmanager 
-	-ansible kunpeng-916 -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
-	ansible kunpeng-916 -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
-	ansible kunpeng-916 -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager && tmux new-session -s podmanager -d 'podmanager'"
+setup_podmanager: push_podmanager
+	ansible myhosts -i ansible.ini -m shell -a "systemctl restart podmanager && systemctl status podmanager"
 
 stop_podmanager:
-	ansible myhosts -i ansible.ini -m shell -a "tmux kill-session -t podmanager"
+	ansible myhosts -i ansible.ini -m shell -a "systemctl stop podmanager"
 
 setup_appmanager:
 	cp bin/appmanager /usr/local/bin/appmanager 

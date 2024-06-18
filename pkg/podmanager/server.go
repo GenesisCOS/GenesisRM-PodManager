@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/cgroups/v3/cgroup2"
 	"github.com/moby/ipvs"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,13 +39,14 @@ type PodInfo struct {
 	Pod            *corev1.Pod
 	PodResource    PodResource
 	Cgroup         *cgroup.Cgroup
-	CPUState       types.CPUState
-	MemoryState    types.MemoryState
+	CPUState       types.PodCPUState
+	MemoryState    types.PodMemoryState
 	ContainerInfos []*ContainerInfo
 }
 
 type PodManager struct {
 	NodeName string
+	Cores    uint64
 
 	client      *kubernetes.Clientset
 	PodInformer coreinformers.PodInformer
@@ -62,29 +62,37 @@ type PodManager struct {
 
 	updateResourceLock sync.Mutex
 
-	PodMap             sync.Map
+	LCPodMap           sync.Map
+	BEPodMap           sync.Map
 	UncontrolledPodMap sync.Map
+
+	BesteffortCgroup *cgroup.Cgroup
+	BurstableCgroup  *cgroup.Cgroup
 }
 
 func (pm *PodManager) PodInfo(pod *corev1.Pod) *PodInfo {
 	key, _ := cache.MetaNamespaceKeyFunc(pod)
-	v, ok := pm.PodMap.Load(key)
-	if !ok {
-		return nil
-	}
-	return v.(*PodInfo)
+	return pm.PodInfoByKey(key)
 }
 
 func (pm *PodManager) PodInfoByKey(key string) *PodInfo {
-	v, ok := pm.PodMap.Load(key)
-	if !ok {
-		return nil
+	v, ok := pm.LCPodMap.Load(key)
+	if ok {
+		return v.(*PodInfo)
 	}
-	return v.(*PodInfo)
+	v, ok = pm.BEPodMap.Load(key)
+	if ok {
+		return v.(*PodInfo)
+	}
+	v, ok = pm.UncontrolledPodMap.Load(key)
+	if ok {
+		return v.(*PodInfo)
+	}
+	return nil
 }
 
 func (pm *PodManager) GetPodMap() *sync.Map {
-	return &(pm.PodMap)
+	return &(pm.LCPodMap)
 }
 
 func (pm *PodManager) GetUncontrolledPodMap() *sync.Map {
@@ -159,7 +167,7 @@ func (c *PodManager) processNextWorkItem(ctx context.Context) bool {
 }
 
 func (manager *PodManager) GetPodInfo(key string) *PodInfo {
-	v, ok := manager.PodMap.Load(key)
+	v, ok := manager.LCPodMap.Load(key)
 	if !ok {
 		return nil
 	}
@@ -236,63 +244,45 @@ func (c *PodManager) setLoadBalanceWeight(pod *corev1.Pod) {
 	}
 }
 
-func (c *PodManager) UpdatePodCPUResource(pInfo *PodInfo, quota uint64) (uint64, error) {
-	c.updateResourceLock.Lock()
-	defer c.updateResourceLock.Unlock()
-
-	nodeResourceInfo := c.NodeResourceInfo()
-	allocatable := nodeResourceInfo.CPU.Allocatable
-
-	if allocatable < quota {
-		quota = allocatable
-	}
-
-	int64Quota := int64(quota)
-
-	period := types.DefaultCPUPeriod
-	pInfo.PodResource.CPU.Quota = quota
-	err := pInfo.Cgroup.Containerd.Update(&cgroup2.Resources{
-		CPU: &cgroup2.CPU{
-			Max: cgroup2.NewCPUMax(&int64Quota, &period),
-		},
-	})
-	if err != nil {
-		klog.ErrorS(err, "")
-	}
-
-	return quota, err
-}
-
-func (c *PodManager) ListLocalPods() []*corev1.Pod {
+func (c *PodManager) listLocalPods(selector labels.Selector) ([]*corev1.Pod, error) {
 	localPods := make([]*corev1.Pod, 0)
-	selector := labels.NewSelector()
-	requirement, err := labels.NewRequirement("swiftkube.io/enabled", selection.Equals, []string{"true"})
-	if err != nil {
-		klog.Error(err)
-		return localPods
-	}
-	selector = selector.Add(*requirement)
 	pods, err := c.PodLister.List(selector)
 	if err != nil {
 		klog.Error(err)
-		return localPods
+		return nil, err
 	}
+	// 过滤在本地的pod
 	for _, pod := range pods {
 		if c.IsLocalPod(pod) {
 			localPods = append(localPods, pod.DeepCopy())
 		}
 	}
-	return localPods
+	return localPods, nil
+}
+
+func (c *PodManager) ListAllLocalPods() ([]*corev1.Pod, error) {
+	return c.listLocalPods(labels.Everything())
+}
+
+func (c *PodManager) ListControlledLocalPods() ([]*corev1.Pod, error) {
+	selector := labels.NewSelector()
+	requirement, err := labels.NewRequirement(types.ENABLED_LABEL, selection.Equals, []string{"true"})
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+	selector = selector.Add(*requirement)
+	return c.listLocalPods(selector)
 }
 
 func (c *PodManager) IsPodControlledByGenesis(pod *corev1.Pod) bool {
-	enabled, ok := pod.GetLabels()["swiftkube.io/enabled"]
+	enabled, ok := pod.GetLabels()[types.ENABLED_LABEL]
 	return ok && enabled == "true"
 }
 
 func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
-	state := pod.GetLabels()["swiftkube.io/state"]
-	endpoint := pod.GetLabels()["swiftkube.io/endpoint"]
+	state := pod.GetLabels()[types.STATE_LABEL]
+	endpoint := pod.GetLabels()[types.ENDPOINT_LABEL]
 
 	// (state == WarmingUp or Ready-FullSpeed) and endpoint == Down
 	if (state == string(types.WU) || state == string(types.RFS)) && endpoint == string(types.ENDPOINT_DOWN) {
@@ -306,7 +296,7 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 			<-t.C
 		}
 
-		pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+		pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
 		for {
 			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
 			if err == nil {
@@ -316,11 +306,11 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 				pod, err = c.PodLister.Pods(pod.Namespace).Get(pod.Name)
 				if errors.IsNotFound(err) {
 					utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-					c.PodMap.Delete(key)
+					c.LCPodMap.Delete(key)
 					return
 				}
 				pod = pod.DeepCopy()
-				pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+				pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
 			}
 		}
 	}
@@ -336,7 +326,7 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 			<-t.C
 		}
 
-		pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+		pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
 		for {
 			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
 			if err == nil {
@@ -346,18 +336,18 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 				pod, err = c.PodLister.Pods(pod.Namespace).Get(pod.Name)
 				if errors.IsNotFound(err) {
 					utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-					c.PodMap.Delete(key)
+					c.LCPodMap.Delete(key)
 					return
 				}
 				pod = pod.DeepCopy()
-				pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+				pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
 			}
 		}
 	}
 
 	// (state == Ready-CatNap or Ready-LongNap) and endpoint == Up
 	if (state == string(types.RCN) || state == string(types.RLN)) && endpoint == string(types.ENDPOINT_UP) {
-		pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_DOWN)
+		pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_DOWN)
 		for {
 			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
 			if err == nil {
@@ -367,11 +357,11 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 				pod, err = c.PodLister.Pods(pod.Namespace).Get(pod.Name)
 				if errors.IsNotFound(err) {
 					utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-					c.PodMap.Delete(key)
+					c.LCPodMap.Delete(key)
 					return
 				}
 				pod = pod.DeepCopy()
-				pod.GetLabels()["swiftkube.io/endpoint"] = string(types.ENDPOINT_UP)
+				pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
 			}
 		}
 	}
@@ -392,7 +382,8 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 		// in which case we stop processing.
 		if errors.IsNotFound(err) {
 			utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
-			c.PodMap.Delete(key)
+			c.LCPodMap.Delete(key)
+			c.BEPodMap.Delete(key)
 			c.UncontrolledPodMap.Delete(key)
 			return nil
 		}
@@ -403,22 +394,18 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 
 	c.setLoadBalanceWeight(pod)
 
-	if !c.IsLocalPod(pod) {
-		c.PodMap.Delete(key)
-		c.UncontrolledPodMap.Delete(key)
-		return nil
-	}
-
-	if !c.IsPodRunning(pod) {
-		c.PodMap.Delete(key)
+	if !c.IsLocalPod(pod) || !c.IsPodRunning(pod) {
+		c.LCPodMap.Delete(key)
+		c.BEPodMap.Delete(key)
 		c.UncontrolledPodMap.Delete(key)
 		return nil
 	}
 
 	podCgroup, err := cgroup.LoadPodCgroup(pod)
 	if err != nil {
-		klog.ErrorS(err, "failed to get pod cgroup")
-		c.PodMap.Delete(key)
+		klog.ErrorS(err, "failed to load pod cgroup")
+		c.LCPodMap.Delete(key)
+		c.BEPodMap.Delete(key)
 		c.UncontrolledPodMap.Delete(key)
 		return nil
 	}
@@ -428,8 +415,9 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 
 		containerCgroup, err := cgroup.LoadContainerCgroup(pod, &containerStatus)
 		if err != nil {
-			klog.ErrorS(err, "fail to get container cgroup")
-			c.PodMap.Delete(key)
+			klog.ErrorS(err, "fail to load container cgroup")
+			c.LCPodMap.Delete(key)
+			c.BEPodMap.Delete(key)
 			c.UncontrolledPodMap.Delete(key)
 			return nil
 		}
@@ -440,33 +428,48 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 		})
 	}
 
+	serviceType := GetServiceType(pod)
+	if serviceType == types.SERVICE_TYPE_UNKNOWN {
+		// 默认所有Pod都是LC的
+		serviceType = types.SERVICE_TYPE_LC
+	}
+
+	var pInfo *PodInfo
+	var loaded bool
+	var v any
+
+	// 新加入Pod时没有初始化ResourceInfo
+	// 所以在我看来新加入的Pod是没有被分到资源的
+	// 即使该Pod此时的CPU利用率很高
+	// 但是问题不大，因为cpuscaler会很快update他的资源的（1秒以内）
+	var podMap *sync.Map = nil
 	if c.IsPodControlledByGenesis(pod) {
 		c.syncPodState(pod, key)
-
-		klog.InfoS("load pod", "pod key", key)
-		c.PodMap.Swap(key, &PodInfo{
-			Pod:            pod.DeepCopy(),
-			Cgroup:         podCgroup,
-			CPUState:       types.CPU_UNKNOWN,
-			MemoryState:    types.MEMORY_UNKNOWN,
-			ContainerInfos: containerInfos,
-		})
+		if serviceType == types.SERVICE_TYPE_LC {
+			podMap = &c.LCPodMap
+		} else if serviceType == types.SERVICE_TYPE_BE {
+			podMap = &c.BEPodMap
+		}
 	} else {
-		klog.InfoS("load external pod", "pod key", key)
-		c.UncontrolledPodMap.Swap(key, &PodInfo{
-			Pod:            pod.DeepCopy(),
-			Cgroup:         podCgroup,
-			CPUState:       types.CPU_UNKNOWN,
-			MemoryState:    types.MEMORY_UNKNOWN,
-			ContainerInfos: containerInfos,
-		})
+		podMap = &c.UncontrolledPodMap
+	}
+	v, loaded = podMap.LoadOrStore(key, &PodInfo{
+		Pod:            pod.DeepCopy(),
+		Cgroup:         podCgroup,
+		CPUState:       types.CPU_UNKNOWN,
+		MemoryState:    types.MEMORY_UNKNOWN,
+		ContainerInfos: containerInfos,
+	})
+	pInfo = v.(*PodInfo)
+	if loaded {
+		pInfo.Pod = pod.DeepCopy()
 	}
 
 	return nil
 }
 
 func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
-	metrics, err := pInfo.Cgroup.Containerd.Stat()
+	metrics, err := pInfo.Cgroup.Control.Stat()
 	if err != nil {
 		return nil, err
 	}
@@ -501,6 +504,7 @@ func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
 	timestamp := time.Now()
 
 	return &PodMetrics{
+		PInfo:        pInfo,
 		PodCPUQuota:  podCPUQuota,
 		PodCPUPeriod: podCPUPeriod,
 
@@ -522,7 +526,7 @@ func (c *PodManager) NodeResourceInfo() *ResourceInfo {
 	totalAllocatableCPU := uint64(float64(totalCPU) * 0.9)
 	allocatable := totalAllocatableCPU
 
-	c.PodMap.Range(func(key, info interface{}) bool {
+	c.LCPodMap.Range(func(key, info interface{}) bool {
 		pInfo := info.(*PodInfo)
 		allocatable -= pInfo.PodResource.CPU.Quota
 		return true
@@ -547,28 +551,25 @@ func (c *PodManager) CollectNodeMetrics() *NodeMetrics {
 	}
 }
 
-func (c *PodManager) CollectPodMetrics() map[string]*PodMetrics {
-	retval := make(map[string]*PodMetrics)
+func (c *PodManager) CollectPodMetrics() []*PodMetrics {
+	retval := make([]*PodMetrics, 0)
 
-	c.PodMap.Range(func(podKey, info interface{}) bool {
-		pInfo := info.(*PodInfo)
-		p, err := c.collectPodMetrics(pInfo)
-		if err != nil {
+	for _, m := range []*sync.Map{
+		&c.LCPodMap,
+		&c.BEPodMap,
+		&c.UncontrolledPodMap,
+	} {
+		m.Range(func(podKey, info interface{}) bool {
+			pInfo := info.(*PodInfo)
+			p, err := c.collectPodMetrics(pInfo)
+			if err != nil {
+				klog.ErrorS(err, "collect pod metrics failed")
+				return true
+			}
+			retval = append(retval, p)
 			return true
-		}
-		retval[podKey.(string)] = p
-		return true
-	})
-
-	c.UncontrolledPodMap.Range(func(podKey, info interface{}) bool {
-		pInfo := info.(*PodInfo)
-		p, err := c.collectPodMetrics(pInfo)
-		if err != nil {
-			return true
-		}
-		retval[podKey.(string)] = p
-		return true
-	})
+		})
+	}
 
 	return retval
 }
@@ -580,6 +581,16 @@ func (m *PodManager) Run(ctx context.Context) error {
 
 	if ok := cache.WaitForCacheSync(ctx.Done(), m.PodSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
+	}
+
+	var err error
+	m.BesteffortCgroup, err = cgroup.LoadBesteffortCgroup()
+	if err != nil {
+		return err
+	}
+	m.BurstableCgroup, err = cgroup.LoadBurstableCgroup()
+	if err != nil {
+		return err
 	}
 
 	// Launch worker to process Pod resources
@@ -598,7 +609,7 @@ func (m *PodManager) Run(ctx context.Context) error {
 		WriteTimeout: 10 * time.Second,
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/cpu/prom", &Monitor{
+	mux.Handle("/stats", &Monitor{
 		manager: m,
 	})
 
@@ -614,6 +625,7 @@ func NewPodManager(nodeName string, clientset *kubernetes.Clientset, informerFac
 	podInformer := informerFactory.Core().V1().Pods()
 	podmanager := &PodManager{
 		NodeName:    nodeName,
+		Cores:       uint64(runtime.NumCPU()),
 		client:      clientset,
 		PodInformer: podInformer,
 		PodLister:   podInformer.Lister(),

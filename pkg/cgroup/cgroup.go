@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/containerd/cgroups/v3"
 	"github.com/containerd/cgroups/v3/cgroup2"
@@ -13,34 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-const (
-	cgroupPath                    = "/sys/fs/cgroup"
-	bestEffortPodCgroupPath       = "/kubepods.slice/kubepods-besteffort.slice"
-	burstablePodCgroupPath        = "/kubepods.slice/kubepods-burstable.slice"
-	bestEffortPodCgroupPathPrefix = "/kubepods-besteffort-pod"
-	burstablePodCgroupPathPrefix  = "/kubepods-burstable-pod"
-	podCgroupPathSuffix           = ".slice"
-)
-
-type CgCPUStat struct {
-	NrPeriods     int64
-	NrThrottled   int64
-	NrBursts      int64
-	ThrottledTime int64
-	BurstTime     int64
-}
-
-type CgMemoryStat struct {
-	Cache int64
-	RSS   int64
-	Swap  int64
-}
-
-func (d *CgMemoryStat) Add(other *CgMemoryStat) {
-	d.RSS += other.RSS
-	d.Cache += other.Cache
-	d.Swap += other.Swap
-}
+var containerGroupCgroups map[string]*Cgroup = make(map[string]*Cgroup, 0)
+var containerGroupCgroupsLock sync.Mutex
 
 func getContainerID(id string) (string, error) {
 	if len(id) == 0 {
@@ -55,31 +30,7 @@ func getContainerID(id string) (string, error) {
 	}
 }
 
-func checkCgFile(path string) error {
-	_, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("file %s not exists", path)
-		}
-	}
-	return err
-}
-
-func loadPodCgroups(podUid types.UID, qosClass corev1.PodQOSClass) (*cgroup2.Manager, string, error) {
-	uid := strings.ReplaceAll(string(podUid), "-", "_")
-	var qos string
-
-	if qosClass == corev1.PodQOSBurstable {
-		qos = "burstable"
-	} else if qosClass == corev1.PodQOSBestEffort {
-		qos = "besteffort"
-	} else {
-		return nil, "", fmt.Errorf("invalid QOS class %s", string(qosClass))
-	}
-
-	path := fmt.Sprintf("/kubepods.slice/kubepods-%s.slice/kubepods-%s-pod%s.slice",
-		qos, qos, uid)
-
+func loadCgroup(path string) (*cgroup2.Manager, string, error) {
 	var control *cgroup2.Manager = nil
 	var err error
 	if cgroups.Mode() == cgroups.Unified {
@@ -94,114 +45,142 @@ func loadPodCgroups(podUid types.UID, qosClass corev1.PodQOSClass) (*cgroup2.Man
 	return control, filepath.Join("/sys/fs/cgroup", path), nil
 }
 
-func loadContainerCgroups(podUid types.UID, qosClass corev1.PodQOSClass, containerId string) (*cgroup2.Manager, string, error) {
-	uid := strings.ReplaceAll(string(podUid), "-", "_")
-	var qos string
+func cgroupPath(qosClass corev1.PodQOSClass, group string, uid string, cid string) (string, error) {
+	var qos string = ""
+	var path string = ""
 
 	if qosClass == corev1.PodQOSBurstable {
-		qos = "burstable"
+		qos = "-burstable"
 	} else if qosClass == corev1.PodQOSBestEffort {
-		qos = "besteffort"
-	} else {
-		return nil, "", fmt.Errorf("invalid QOS class %s", string(qosClass))
+		qos = "-besteffort"
 	}
 
-	path := fmt.Sprintf("/kubepods.slice/kubepods-%s.slice/kubepods-%s-pod%s.slice/%s",
-		qos, qos, uid, fmt.Sprintf("/cri-containerd-%s.scope", containerId))
+	if qos != "" {
+		path = filepath.Join("/kubepods.slice", fmt.Sprintf("kubepods%s.slice", qos))
+	} else {
+		path = "/kubepods.slice"
+	}
 
-	var control *cgroup2.Manager = nil
-	var err error
-	if cgroups.Mode() == cgroups.Unified {
-		control, err = cgroup2.Load(path, cgroup2.WithMountpoint("/sys/fs/cgroup"))
+	if group != "" {
+		group = "-" + strings.ReplaceAll(group, "-", "_")
+	}
+
+	if group != "" {
+		if qos != "" {
+			path = filepath.Join(
+				path,
+				fmt.Sprintf("kubepods%s%s.slice", qos, group),
+			)
+		} else {
+			path = filepath.Join(
+				path,
+				fmt.Sprintf("kubepods%s.slice", group),
+			)
+		}
+	}
+
+	if uid != "" {
+		uid = strings.ReplaceAll(uid, "-", "_")
+		if group != "" {
+			if qos != "" {
+				path = filepath.Join(
+					path,
+					fmt.Sprintf("kubepods%s%s-pod%s.slice", qos, group, uid),
+				)
+			} else {
+				path = filepath.Join(
+					path,
+					fmt.Sprintf("kubepods%s-pod%s.slice", group, uid),
+				)
+			}
+		} else {
+			if qos != "" {
+				path = filepath.Join(
+					path,
+					fmt.Sprintf("kubepods%s-pod%s.slice", qos, uid),
+				)
+			} else {
+				path = filepath.Join(
+					path,
+					fmt.Sprintf("kubepods-pod%s.slice", uid),
+				)
+			}
+		}
+	}
+
+	if cid != "" {
+		// TODO 目前只支持containerd作为容器运行时
+		path = filepath.Join(
+			path,
+			fmt.Sprintf("cri-containerd-%s.scope", cid),
+		)
+	}
+
+	return path, nil
+}
+
+func GetContainerGroupCgroup(group string) *Cgroup {
+	return containerGroupCgroups[group]
+}
+
+func loadContainerGroupCgroup(groupName string, qosClass corev1.PodQOSClass) error {
+	containerGroupCgroupsLock.Lock()
+	defer containerGroupCgroupsLock.Unlock()
+
+	_, ok := containerGroupCgroups[groupName]
+	if !ok {
+		path, err := cgroupPath(qosClass, groupName, "", "")
+		if err != nil {
+			return err
+		}
+		control, path, err := loadCgroup(path)
+		if err != nil {
+			return err
+		}
+		containerGroupCgroups[groupName] = &Cgroup{
+			path:    path,
+			Control: control,
+		}
+	}
+
+	return nil
+}
+
+func loadBurstableCgroup() (*cgroup2.Manager, string, error) {
+	path := "/kubepods.slice/kubepods-burstable.slice"
+	return loadCgroup(path)
+}
+
+func loadBesteffortCgroup() (*cgroup2.Manager, string, error) {
+	path := "/kubepods.slice/kubepods-besteffort.slice"
+	return loadCgroup(path)
+}
+
+func loadPodCgroup(uid types.UID, qosClass corev1.PodQOSClass, group string) (*cgroup2.Manager, string, error) {
+	if group != "" {
+		err := loadContainerGroupCgroup(group, qosClass)
 		if err != nil {
 			return nil, "", err
 		}
-	} else {
-		return nil, "", fmt.Errorf("only support cgroup v2")
 	}
-
-	return control, filepath.Join("/sys/fs/cgroup", path), err
+	path, err := cgroupPath(qosClass, group, string(uid), "")
+	if err != nil {
+		return nil, "", err
+	}
+	return loadCgroup(path)
 }
 
-func getPodCgFilePath(podUid types.UID, qosClass corev1.PodQOSClass, file string) (string, error) {
-	uid := strings.ReplaceAll(string(podUid), "-", "_")
-	var qos string
-
-	if qosClass == corev1.PodQOSBurstable {
-		qos = "burstable"
-	} else if qosClass == corev1.PodQOSBestEffort {
-		qos = "besteffort"
-	} else {
-		return "", fmt.Errorf("invalid QOS class %s", string(qosClass))
-	}
-
-	path := fmt.Sprintf("/sys/fs/cgroup/kubepods.slice/kubepods-%s.slice/kubepods-%s-pod%s.slice/%s",
-		qos, qos, uid, file)
-
-	return path, nil
-}
-
-func getContainerCgFilePath(podUid types.UID, qosClass corev1.PodQOSClass, family string, containerId string, file string) (string, error) {
-	path := ""
-	uid := strings.ReplaceAll(string(podUid), "-", "_")
-
-	if qosClass == corev1.PodQOSBurstable {
-		path += cgroupPath + fmt.Sprintf("/%s", family) + burstablePodCgroupPath + burstablePodCgroupPathPrefix + uid + podCgroupPathSuffix + fmt.Sprintf("/cri-containerd-%s.scope/", containerId) + file
-	} else if qosClass == corev1.PodQOSBestEffort {
-		path += cgroupPath + fmt.Sprintf("/%s", family) + bestEffortPodCgroupPath + bestEffortPodCgroupPathPrefix + uid + podCgroupPathSuffix + fmt.Sprintf("/cri-containerd-%s.scope/", containerId) + file
-	} else {
-		return "", fmt.Errorf("invalid QOS class %s", string(qosClass))
-	}
-
-	err := checkCgFile(path)
+func loadContainerCgroup(uid types.UID, qosClass corev1.PodQOSClass, containerId string, group string) (*cgroup2.Manager, string, error) {
+	path, err := cgroupPath(qosClass, group, string(uid), containerId)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-
-	return path, nil
-}
-
-func cgReadInt64(file string) (int64, error) {
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return 0, err
-	}
-	value, err := strconv.ParseInt(string(data[:len(data)-1]), 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return value, nil
-}
-
-func cgReadUInt64(file string) (uint64, error) {
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return 0, err
-	}
-	value, err := strconv.ParseUint(string(data[:len(data)-1]), 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return value, nil
-}
-
-func cgWriteInt64(file string, value int64) error {
-	return cgWriteString(file, fmt.Sprintf("%d", value))
-}
-
-func cgWriteString(file string, value string) error {
-	f, err := os.OpenFile(file, os.O_WRONLY|os.O_TRUNC, 0666)
-	if err != nil {
-		return err
-	}
-	_, err = f.WriteString(value)
-	f.Sync()
-	return err
+	return loadCgroup(path)
 }
 
 type Cgroup struct {
-	path       string
-	Containerd *cgroup2.Manager
+	path    string
+	Control *cgroup2.Manager
 }
 
 func (cg *Cgroup) GetCPUQuotaAndPeriod() (int64, uint64, error) {
@@ -210,6 +189,7 @@ func (cg *Cgroup) GetCPUQuotaAndPeriod() (int64, uint64, error) {
 		return 0, 0, err
 	}
 	v := string(bytes)
+	v = strings.Trim(v, "\n")
 	vs := strings.Split(v, " ")
 	if len(vs) != 2 {
 		return 0, 0, fmt.Errorf("parse cpu.max failed")
@@ -230,33 +210,67 @@ func (cg *Cgroup) GetCPUQuotaAndPeriod() (int64, uint64, error) {
 	return quota, period, nil
 }
 
-func LoadContainerCgroup(pod *corev1.Pod, con *corev1.ContainerStatus) (*Cgroup, error) {
-	containerId, err := getContainerID(con.ContainerID)
-	if err != nil {
-		return nil, err
-	}
-	containerdCgroups, path, err := loadContainerCgroups(pod.GetUID(), pod.Status.QOSClass, containerId)
+func LoadBesteffortCgroup() (*Cgroup, error) {
+	control, path, err := loadBesteffortCgroup()
 	if err != nil {
 		return nil, err
 	}
 
 	cg := &Cgroup{
-		path:       path,
-		Containerd: containerdCgroups,
+		path:    path,
+		Control: control,
+	}
+	return cg, nil
+}
+
+func LoadBurstableCgroup() (*Cgroup, error) {
+	control, path, err := loadBurstableCgroup()
+	if err != nil {
+		return nil, err
+	}
+
+	cg := &Cgroup{
+		path:    path,
+		Control: control,
+	}
+	return cg, nil
+}
+
+func LoadContainerCgroup(pod *corev1.Pod, con *corev1.ContainerStatus) (*Cgroup, error) {
+	containerId, err := getContainerID(con.ContainerID)
+	if err != nil {
+		return nil, err
+	}
+	podGroup, ok := pod.GetLabels()["genesis.io/container-group"]
+	if !ok {
+		podGroup = ""
+	}
+	control, path, err := loadContainerCgroup(pod.GetUID(), pod.Status.QOSClass, containerId, podGroup)
+	if err != nil {
+		return nil, err
+	}
+
+	cg := &Cgroup{
+		path:    path,
+		Control: control,
 	}
 
 	return cg, nil
 }
 
 func LoadPodCgroup(pod *corev1.Pod) (*Cgroup, error) {
-	containerdCgroups, path, err := loadPodCgroups(pod.GetUID(), pod.Status.QOSClass)
+	group, ok := pod.GetLabels()["genesis.io/container-group"]
+	if !ok {
+		group = ""
+	}
+	control, path, err := loadPodCgroup(pod.GetUID(), pod.Status.QOSClass, group)
 	if err != nil {
 		return nil, err
 	}
 
 	cg := &Cgroup{
-		path:       path,
-		Containerd: containerdCgroups,
+		path:    path,
+		Control: control,
 	}
 
 	return cg, nil
