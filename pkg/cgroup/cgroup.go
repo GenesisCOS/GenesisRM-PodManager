@@ -263,6 +263,7 @@ func LoadPodCgroup(pod *corev1.Pod) (*Cgroup, error) {
 	if !ok {
 		group = ""
 	}
+
 	control, path, err := loadPodCgroup(pod.GetUID(), pod.Status.QOSClass, group)
 	if err != nil {
 		return nil, err

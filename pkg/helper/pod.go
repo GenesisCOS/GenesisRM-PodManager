@@ -54,3 +54,15 @@ func GetPodThrottleTarget(pod *corev1.Pod) float64 {
 	}
 	return throttleTarget
 }
+
+func GetPodCPURequest(pod *corev1.Pod) (uint64, error) {
+	cpuRequestStr, ok := pod.GetLabels()["swiftkube.io/cpu-request"]
+	if !ok {
+		return 0, nil
+	}
+	cpuRequest, err := strconv.ParseUint(cpuRequestStr, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return cpuRequest, nil
+}

@@ -15,14 +15,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	kuberuntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeinformers "k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
+	typedv1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
@@ -61,14 +64,20 @@ type PodManager struct {
 	// simultaneously in two different workers.
 	workqueue workqueue.RateLimitingInterface
 
-	updateResourceLock sync.Mutex
-
 	LCPodMap           sync.Map
 	BEPodMap           sync.Map
 	UncontrolledPodMap sync.Map
 
 	BesteffortCgroup *cgroup.Cgroup
 	BurstableCgroup  *cgroup.Cgroup
+
+	EventBroadcaster record.EventBroadcaster
+}
+
+func (pm *PodManager) GetRecorder() record.EventRecorder {
+	scheme := kuberuntime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	return pm.EventBroadcaster.NewRecorder(scheme, corev1.EventSource{})
 }
 
 func (pm *PodManager) PodInfo(pod *corev1.Pod) *PodInfo {
@@ -502,13 +511,9 @@ func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
 		kubernetesContainerMetrics = append(kubernetesContainerMetrics, cm)
 	}
 
-	cpuRequestStr, ok := pInfo.Pod.GetLabels()["swiftkube.io/cpu-request"]
-	if !ok {
-		cpuRequestStr = "0"
-	}
-	cpuRequest, err := strconv.ParseUint(cpuRequestStr, 10, 64)
+	cpuRequest, err := helper.GetPodCPURequest(pInfo.Pod)
 	if err != nil {
-		cpuRequest = 0
+		c.GetRecorder().Event(pInfo.Pod, corev1.EventTypeWarning, "CollectingMetrics", err.Error())
 	}
 
 	timestamp := time.Now()
@@ -635,14 +640,18 @@ func (m *PodManager) Run(ctx context.Context) error {
 func NewPodManager(nodeName string, clientset *kubernetes.Clientset, informerFactory kubeinformers.SharedInformerFactory) *PodManager {
 	podInformer := informerFactory.Core().V1().Pods()
 	podmanager := &PodManager{
-		NodeName:    nodeName,
-		Cores:       uint64(runtime.NumCPU()),
-		client:      clientset,
-		PodInformer: podInformer,
-		PodLister:   podInformer.Lister(),
-		PodSynced:   podInformer.Informer().HasSynced,
-		workqueue:   workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "PodManager"),
+		NodeName:         nodeName,
+		Cores:            uint64(runtime.NumCPU()),
+		client:           clientset,
+		PodInformer:      podInformer,
+		PodLister:        podInformer.Lister(),
+		PodSynced:        podInformer.Informer().HasSynced,
+		workqueue:        workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "PodManager"),
+		EventBroadcaster: record.NewBroadcaster(),
 	}
+
+	podmanager.EventBroadcaster.StartStructuredLogging(4)
+	podmanager.EventBroadcaster.StartRecordingToSink(&typedv1core.EventSinkImpl{Interface: clientset.CoreV1().Events("")})
 
 	podmanager.PodInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: podmanager.enqueuePod,
