@@ -27,8 +27,9 @@ type KubernetesPodMetrics struct {
 type PodMetrics struct {
 	PInfo *PodInfo
 
-	PodCPUQuota  int64
-	PodCPUPeriod uint64
+	PodCPUQuota   int64
+	PodCPUPeriod  uint64
+	PodCPURequest uint64
 
 	Kubernetes *KubernetesPodMetrics
 	timestamp  time.Time

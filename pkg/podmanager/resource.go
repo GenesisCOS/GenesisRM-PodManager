@@ -101,7 +101,7 @@ func (c *PodManager) UpdatePodCPUSet(pInfo *PodInfo, cpus []uint64) error {
 	return err
 }
 
-func (c *PodManager) UpdatePodCPUQuota(pInfo *PodInfo, quota uint64, ignoreResourcePool bool) error {
+func (c *PodManager) UpdatePodCPUQuota(pInfo *PodInfo, quota uint64) error {
 	int64Quota := int64(quota)
 	period := types.DefaultCPUPeriod
 

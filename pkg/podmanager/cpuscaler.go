@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	statsv1 "github.com/containerd/cgroups/v3/cgroup2/stats"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
+	"swiftkube.io/swiftkube/pkg/helper"
 	"swiftkube.io/swiftkube/pkg/podmanager/sample"
 	"swiftkube.io/swiftkube/pkg/podmanager/types"
 )
@@ -95,8 +97,8 @@ func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float6
 	return uint64(math.Ceil(quota * float64(types.DefaultCPUPeriod)))
 }
 
-func (s *CPUScaler) update(pInfo *PodInfo, quota uint64, metrics *CPUMetrics, state types.PodCPUState, ignoreResourcePool bool) {
-	err := s.podmanager.UpdatePodCPUQuota(pInfo, quota, ignoreResourcePool)
+func (s *CPUScaler) update(pInfo *PodInfo, quota uint64, metrics *CPUMetrics, state types.PodCPUState) {
+	err := s.podmanager.UpdatePodCPUQuota(pInfo, quota)
 	if err != nil {
 		klog.ErrorS(err, "failed to update resource")
 	}
@@ -124,6 +126,7 @@ func (s *CPUScaler) cleanupMetrics() {
 type updateAction struct {
 	pInfo              *PodInfo
 	quota              uint64
+	request            uint64
 	metrics            *CPUMetrics
 	state              types.PodCPUState
 	ignoreResourcePool bool
@@ -147,7 +150,6 @@ func (s *CPUScaler) Start(ctx context.Context) {
 		// 包含LC Pod和LC Mix Pod的UpdateAction
 		updateActions := make([]*updateAction, 0)
 		bePods := make([]*PodInfo, 0)
-		lcMixPods := make([]*PodInfo, 0)
 		beMixPods := make([]*PodInfo, 0)
 
 		for _, pod := range localPods {
@@ -159,7 +161,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				continue
 			}
 
-			serviceType := GetServiceType(pInfo.Pod)
+			serviceType := helper.GetPodServiceType(pInfo.Pod)
 			cpuset, ok := pod.GetLabels()[types.CPUSET_LABEL]
 			if !ok {
 				if serviceType == types.SERVICE_TYPE_BE {
@@ -186,16 +188,16 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				continue
 			}
 
-			if cpuset == types.CPUSET_MIX {
-				lcMixPods = append(lcMixPods, pInfo)
+			cpuRequestStr, ok := pod.GetLabels()["swiftkube.io/cpu-request"]
+			if !ok {
+				cpuRequestStr = "3000"
 			}
-
-			// 把CPU request作为最高CPU quota
-			var totalCPURequest float64 = 0
-			for _, container := range pInfo.Pod.Spec.Containers {
-				totalCPURequest += float64(container.Resources.Requests.Cpu().MilliValue())
+			cpuRequest, err := strconv.ParseUint(cpuRequestStr, 10, 64)
+			if err != nil {
+				klog.Error(err)
+				cpuRequest = 3000
 			}
-			maxCPUQuota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * (totalCPURequest / 1000)))
+			requestQuota := (float64(cpuRequest) / 1000) * float64(types.DefaultCPUPeriod)
 
 			// 是否所有容器都ready了
 			allReady := true
@@ -206,7 +208,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				}
 			}
 
-			throttleTarget := GetThrottleTarget(pInfo.Pod)
+			throttleTarget := helper.GetPodThrottleTarget(pInfo.Pod)
 
 			var metrics *CPUMetrics
 			if m, ok := s.cpuMetrics[key]; ok {
@@ -253,7 +255,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 			}
 
 			if cpuset == types.CPUSET_MIX {
-				quota := maxCPUQuota
+				quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 				updateActions = append(updateActions, &updateAction{
 					pInfo:              pInfo,
 					quota:              quota,
@@ -268,10 +270,11 @@ func (s *CPUScaler) Start(ctx context.Context) {
 			if allReady {
 				if state == types.RR { // Ready-Running
 					quota := s.dynCalculateQuota(metrics, throttleTarget)
-					quota = min(maxCPUQuota, quota)
+					quota = min(uint64(math.Ceil(float64(types.DefaultCPUPeriod)*types.DefaultMaxCPULimit)), quota)
 					updateActions = append(updateActions, &updateAction{
 						pInfo:              pInfo,
 						quota:              quota,
+						request:            uint64(requestQuota),
 						metrics:            metrics,
 						state:              types.CPU_DYNAMIC_OVERPROVISION,
 						ignoreResourcePool: false,
@@ -283,6 +286,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 					updateActions = append(updateActions, &updateAction{
 						pInfo:              pInfo,
 						quota:              quota,
+						request:            uint64(requestQuota),
 						metrics:            metrics,
 						state:              types.CPU_MAX,
 						ignoreResourcePool: true,
@@ -290,10 +294,11 @@ func (s *CPUScaler) Start(ctx context.Context) {
 					})
 
 				} else if state == types.RFS {
-					quota := maxCPUQuota
+					quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 					updateActions = append(updateActions, &updateAction{
 						pInfo:              pInfo,
 						quota:              quota,
+						request:            uint64(requestQuota),
 						metrics:            metrics,
 						state:              types.CPU_MAX,
 						ignoreResourcePool: false,
@@ -303,20 +308,22 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				} else if state == types.RCN || state == types.RLN { // Ready-CatNap Ready-LongNap
 					if endpoint == string(types.ENDPOINT_DOWN) {
 						quota := s.dynCalculateQuota(metrics, 0.7)
-						quota = min(maxCPUQuota, quota)
+						quota = min(uint64(math.Ceil(float64(types.DefaultCPUPeriod)*types.DefaultMaxCPULimit)), quota)
 						updateActions = append(updateActions, &updateAction{
 							pInfo:              pInfo,
 							quota:              quota,
+							request:            uint64(requestQuota),
 							metrics:            metrics,
 							state:              types.CPU_DYNAMIC_RESOURCE_EFFICIENT,
 							ignoreResourcePool: false,
-							cpuset:             cpuset,
+							cpuset:             types.CPUSET_BE, // RCN与RLN Pod自动转为BE cpuset
 						})
 					} else {
-						quota := maxCPUQuota
+						quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
 						updateActions = append(updateActions, &updateAction{
 							pInfo:              pInfo,
 							quota:              quota,
+							request:            uint64(requestQuota),
 							metrics:            metrics,
 							state:              types.CPU_MAX,
 							ignoreResourcePool: false,
@@ -330,6 +337,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				updateActions = append(updateActions, &updateAction{
 					pInfo:              pInfo,
 					quota:              quota,
+					request:            uint64(requestQuota),
 					metrics:            metrics,
 					state:              types.CPU_MAX,
 					ignoreResourcePool: true,
@@ -340,13 +348,17 @@ func (s *CPUScaler) Start(ctx context.Context) {
 
 		var totalRequestLCCores float64 = 0
 		var totalRequestMixCores float64 = 0
+		// updateActions 中全部为 LC Pod
 		for _, action := range updateActions {
-			requestCores := float64(action.quota) / float64(types.DefaultCPUPeriod)
-			if action.cpuset == types.CPUSET_MIX {
-				totalRequestMixCores += requestCores
-				continue
+			allocateCores := float64(action.quota) / float64(types.DefaultCPUPeriod)
+			requestCores := float64(action.request) / float64(types.DefaultCPUPeriod)
+			switch action.cpuset {
+			case types.CPUSET_MIX:
+				totalRequestMixCores += min(requestCores, allocateCores) // MIX cpuset中的LC Pod
+			case types.CPUSET_LC:
+				totalRequestLCCores += min(requestCores, allocateCores) // LC cpuset中的LC Pod
+			default:
 			}
-			totalRequestLCCores += requestCores
 		}
 
 		if totalRequestLCCores > float64(s.podmanager.Cores) {
@@ -356,41 +368,59 @@ func (s *CPUScaler) Start(ctx context.Context) {
 		totalRequestLCCoresInt := uint64(math.Ceil(totalRequestLCCores))
 		// update LC pods cpu resources
 		for _, action := range updateActions {
-			s.update(action.pInfo, action.quota, action.metrics, action.state, action.ignoreResourcePool)
 			if action.cpuset == types.CPUSET_LC {
 				s.podmanager.UpdatePodCPUSetFromLower(action.pInfo, totalRequestLCCoresInt)
 			}
+			s.update(action.pInfo, action.quota, action.metrics, action.state)
 		}
 
 		// 混部区域，该cpuset即存在LC任务也存在BE任务
 		totalRequestMixCoresInt := uint64(math.Ceil(totalRequestMixCores))
-		rangeStart := totalRequestLCCoresInt
-		rangeEnd := min(s.podmanager.Cores, totalRequestLCCoresInt+totalRequestMixCoresInt-1)
-		for _, pod := range lcMixPods {
-			if rangeStart == rangeEnd {
-				s.podmanager.UpdatePodCPUSetFromLower(pod, totalRequestLCCoresInt)
+		mixCpusetRangeStart := totalRequestLCCoresInt
+		mixCpusetRangeEnd := min(s.podmanager.Cores-1, totalRequestLCCoresInt+totalRequestMixCoresInt-1)
+		for _, action := range updateActions {
+			if mixCpusetRangeEnd >= mixCpusetRangeStart {
+				if action.cpuset == types.CPUSET_MIX {
+					s.podmanager.UpdatePodCPUSetRange(action.pInfo, mixCpusetRangeStart, mixCpusetRangeEnd)
+				}
+				s.update(
+					action.pInfo,
+					uint64(math.Ceil(float64(types.DefaultCPUPeriod)*types.DefaultMaxCPULimit)),
+					action.metrics,
+					action.state,
+				)
 			} else {
-				s.podmanager.UpdatePodCPUSetRange(pod, rangeStart, rangeEnd)
+				if action.cpuset == types.CPUSET_LC {
+					s.podmanager.UpdatePodCPUSetFromLower(action.pInfo, totalRequestLCCoresInt)
+				}
+				s.update(action.pInfo, action.quota, action.metrics, action.state)
 			}
 		}
 
 		// update BE pods cpu resources
 		beCores := s.podmanager.Cores - totalRequestLCCoresInt - totalRequestMixCoresInt
-		beCores = max(beCores, 2) // 最少分配2核
+		// 至少分配 total cpus * 0.03 的核给 BE cpuset
+		minBeCores := uint64(math.Ceil(float64(s.podmanager.Cores) * 0.03))
+		beCores = max(beCores, minBeCores)
+
+		mixCores := s.podmanager.Cores - mixCpusetRangeStart
+		mixCores = max(mixCores, minBeCores)
+
+		for _, action := range updateActions {
+			if action.cpuset == types.CPUSET_BE {
+				s.podmanager.UpdatePodCPUSetFromUpper(action.pInfo, mixCores)
+			}
+		}
 
 		for _, beMixPod := range beMixPods {
-			if rangeStart == rangeEnd {
-				s.podmanager.UpdatePodCPUSetFromUpper(beMixPod, beCores)
-			} else {
-				s.podmanager.UpdatePodCPUSetRange(beMixPod, rangeStart, rangeEnd)
-			}
+			s.podmanager.UpdatePodCPUSetFromUpper(beMixPod, mixCores)
 		}
 
 		for _, bePod := range bePods {
 			s.podmanager.UpdatePodCPUSetFromUpper(bePod, beCores)
 		}
 
-		//klog.InfoS("cpusets", "LC", totalRequestLCCoresInt, "MIX", totalRequestMixCoresInt, "BE", beCores)
+		// klog.InfoS("cpusets", "LC", totalRequestLCCoresInt, "MIX", totalRequestMixCoresInt, "BE", beCores)
 
 		s.cleanupMetrics()
 		<-timer.C

@@ -87,17 +87,14 @@ setup_podmanager: push_podmanager
 stop_podmanager:
 	ansible myhosts -i ansible.ini -m shell -a "systemctl stop podmanager"
 
-setup_appmanager:
+setup_appmanager: build_appmanager
+	-tmux kill-session -t appmanager
+	sleep 2
 	cp bin/appmanager /usr/local/bin/appmanager 
 	tmux new-session -s appmanager -d 'appmanager'
 
 stop_appmanager:
 	tmux kill-session -t appmanager 
-
-resetup_appmanager: build_appmanager
-	- tmux kill-session -t appmanager 
-	cp bin/appmanager /usr/local/bin/appmanager 
-	tmux new-session -s appmanager -d 'appmanager'
 
 .PHONY: clean 
 clean:

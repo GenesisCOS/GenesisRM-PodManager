@@ -35,6 +35,10 @@ type ApplicationManager struct {
 	deployInformer appsinformers.DeploymentInformer
 	deployLister   appslisters.DeploymentLister
 	deploySynced   cache.InformerSynced
+
+	nodeInformer coreinformers.NodeInformer
+	nodeLister   corelisters.NodeLister
+	nodeSynced   cache.InformerSynced
 }
 
 func (manager *ApplicationManager) Run(ctx context.Context) error {
@@ -42,38 +46,37 @@ func (manager *ApplicationManager) Run(ctx context.Context) error {
 
 	logger.Info("Waiting for informer caches to sync")
 
-	if ok := cache.WaitForCacheSync(ctx.Done(), manager.podSynced, manager.deploySynced); !ok {
+	if ok := cache.WaitForCacheSync(
+		ctx.Done(),
+		manager.podSynced,
+		manager.deploySynced,
+		manager.nodeSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
+	server := &http.Server{
+		Addr:         "0.0.0.0:10001",
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/stat", &statHandler{
+		appmanager: manager,
+	})
+
+	server.Handler = mux
+	go server.ListenAndServe()
+
 	deployHelperWS := NewDeploymentHelperWebService(manager)
+	nodeHelperWS := NewNodeHelperWebService(manager)
 
 	restful.DefaultContainer.Add(deployHelperWS.WebService())
+	restful.DefaultContainer.Add(nodeHelperWS.WebService())
 	log.Fatal(http.ListenAndServe(":10000", nil))
 
-	/*
-		server := &http.Server{
-			Addr:         "0.0.0.0:10000",
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
-		}
-		mux := http.NewServeMux()
-		mux.Handle("/pods/lister/", &listerHandler{
-			manager: manager,
-		})
-		mux.Handle("/pods/list-for-deploy/", &ListPodsForDeploymentHandler{
-			appmanager: manager,
-		})
-		mux.Handle("/stat", &statHandler{
-			appmanager: manager,
-		})
-
-		server.Handler = mux
-		go server.ListenAndServe()
-	*/
 	<-ctx.Done()
 
-	// server.Close()
+	server.Close()
 	return nil
 }
 
@@ -163,6 +166,7 @@ func NewApplicationManagerCommand() *cobra.Command {
 
 			podInformer := kubeInformerFactory.Core().V1().Pods()
 			deployInformer := kubeInformerFactory.Apps().V1().Deployments()
+			nodeInformer := kubeInformerFactory.Core().V1().Nodes()
 
 			appManager := &ApplicationManager{
 				podInformer: podInformer,
@@ -172,6 +176,10 @@ func NewApplicationManagerCommand() *cobra.Command {
 				deployInformer: deployInformer,
 				deployLister:   deployInformer.Lister(),
 				deploySynced:   deployInformer.Informer().HasSynced,
+
+				nodeInformer: nodeInformer,
+				nodeLister:   nodeInformer.Lister(),
+				nodeSynced:   nodeInformer.Informer().HasSynced,
 			}
 			/*
 				controllerContext := ControllerContext{

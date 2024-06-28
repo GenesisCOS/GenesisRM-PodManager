@@ -3,6 +3,8 @@ package podmanager
 import (
 	"fmt"
 	"net/http"
+
+	"swiftkube.io/swiftkube/pkg/helper"
 )
 
 type Monitor struct {
@@ -32,16 +34,8 @@ func parsePodMetric(name string, value float64, labels map[string]string, pInfo 
 	labels["podname"] = pInfo.Pod.GetName()
 	labels["namespace"] = pInfo.Pod.GetNamespace()
 	labels["nodename"] = pInfo.Pod.Spec.NodeName
-	state, ok := pInfo.Pod.GetLabels()["swiftkube.io/state"]
-	if !ok {
-		state = "None"
-	}
-	labels["state"] = state
-	serviceType, ok := pInfo.Pod.GetLabels()["swiftkube.io/service-type"]
-	if !ok {
-		serviceType = "None"
-	}
-	labels["servicetype"] = serviceType
+	labels["state"] = helper.GetPodState(pInfo.Pod).String()
+	labels["serviceType"] = helper.GetPodServiceType(pInfo.Pod).String()
 
 	labelString := ""
 	for k, v := range labels {
@@ -66,7 +60,7 @@ func (c *Monitor) parsePodMetricsResponse(pInfo *PodInfo, v *PodMetrics) []byte 
 
 	// K8s stats
 	out += parsePodMetric("swiftmonitor_pod_total_memory_request", float64(v.Kubernetes.TotalMemRequest), make(map[string]string), pInfo)
-	out += parsePodMetric("swiftmonitor_pod_total_cpu_request", float64(v.Kubernetes.TotalCPURequest), make(map[string]string), pInfo)
+	out += parsePodMetric("swiftmonitor_pod_total_cpu_request", float64(v.PodCPURequest), make(map[string]string), pInfo)
 	out += parsePodMetric("swiftmonitor_pod_total_memory_limit", float64(v.Kubernetes.TotalMemLimit), make(map[string]string), pInfo)
 	out += parsePodMetric("swiftmonitor_pod_total_cpu_limit", float64(v.Kubernetes.TotalCPULimit), make(map[string]string), pInfo)
 

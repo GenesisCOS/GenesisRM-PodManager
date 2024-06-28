@@ -27,6 +27,7 @@ import (
 	"k8s.io/klog/v2"
 
 	cgroup "swiftkube.io/swiftkube/pkg/cgroup"
+	"swiftkube.io/swiftkube/pkg/helper"
 	"swiftkube.io/swiftkube/pkg/podmanager/types"
 )
 
@@ -428,7 +429,7 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 		})
 	}
 
-	serviceType := GetServiceType(pod)
+	serviceType := helper.GetPodServiceType(pod)
 	if serviceType == types.SERVICE_TYPE_UNKNOWN {
 		// 默认所有Pod都是LC的
 		serviceType = types.SERVICE_TYPE_LC
@@ -501,12 +502,22 @@ func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
 		kubernetesContainerMetrics = append(kubernetesContainerMetrics, cm)
 	}
 
+	cpuRequestStr, ok := pInfo.Pod.GetLabels()["swiftkube.io/cpu-request"]
+	if !ok {
+		cpuRequestStr = "0"
+	}
+	cpuRequest, err := strconv.ParseUint(cpuRequestStr, 10, 64)
+	if err != nil {
+		cpuRequest = 0
+	}
+
 	timestamp := time.Now()
 
 	return &PodMetrics{
-		PInfo:        pInfo,
-		PodCPUQuota:  podCPUQuota,
-		PodCPUPeriod: podCPUPeriod,
+		PInfo:         pInfo,
+		PodCPUQuota:   podCPUQuota,
+		PodCPUPeriod:  podCPUPeriod,
+		PodCPURequest: cpuRequest,
 
 		Kubernetes: &KubernetesPodMetrics{
 			containers:      kubernetesContainerMetrics,

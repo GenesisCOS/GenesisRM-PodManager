@@ -6,14 +6,13 @@ import (
 	"io"
 	"net/http"
 
-	restful "github.com/emicklei/go-restful/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/klog/v2"
+	"swiftkube.io/swiftkube/pkg/helper"
 )
 
 type listerResponse struct {
@@ -184,128 +183,60 @@ type statHandler struct {
 }
 
 func (c *statHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	selector := labels.NewSelector()
-	requirement, err := labels.NewRequirement("swiftkube.io/state", selection.Equals, []string{"Ready-Running"})
-	if err != nil {
-		return
-	}
-	selector = selector.Add(*requirement)
+	podMap := make(map[string]map[string]map[string]int64)
 
-	podMap := make(map[string]map[string]int64)
-
-	rr_pods, err := c.appmanager.podLister.List(selector)
+	pods, err := c.appmanager.podLister.List(labels.Everything())
 	if err != nil {
 		klog.ErrorS(err, "list pods error")
 		return
 	}
-	for _, pod := range rr_pods {
+	for _, pod := range pods {
 		if pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-		namespace := pod.Namespace
+		enabled, ok := pod.GetLabels()["swiftkube.io/enabled"]
+		if !ok {
+			continue
+		}
+		if enabled == "false" {
+			continue
+		}
 		service, ok := pod.GetLabels()["swiftkube.io/service"]
 		if !ok {
 			continue
 		}
+		namespace := pod.Namespace
 		_, ok = podMap[namespace]
 		if !ok {
-			podMap[namespace] = make(map[string]int64)
+			podMap[namespace] = make(map[string]map[string]int64)
 		}
 		_, ok = podMap[namespace][service]
 		if !ok {
-			podMap[namespace][service] = 0
+			podMap[namespace][service] = make(map[string]int64)
 		}
-		podMap[namespace][service] += 1
+		state := helper.GetPodState(pod)
+		_, ok = podMap[namespace][service][state.String()]
+		if !ok {
+			podMap[namespace][service][state.String()] = 0
+		}
+		_, ok = podMap[namespace][service]["__all__"]
+		if !ok {
+			podMap[namespace][service]["__all__"] = 0
+		}
+		podMap[namespace][service][state.String()] += 1
+		podMap[namespace][service]["__all__"] += 1
 	}
 
 	out := ""
 
 	for namespace, services := range podMap {
-		for service, nr_rr_pod := range services {
-			out += fmt.Sprintf("genesis_rr_pods_number{service=\"%s\", namespace=\"%s\"} %d\n",
-				service, namespace, nr_rr_pod)
+		for service, states := range services {
+			for state, number := range states {
+				out += fmt.Sprintf("genesis_pods_number{service=\"%s\", namespace=\"%s\", state=\"%s\"} %d\n",
+					service, namespace, state, number)
+			}
 		}
 	}
 
 	w.Write([]byte(out))
-}
-
-type PodList struct {
-	Pods []*corev1.Pod `json:"pods"`
-}
-
-type Deployment struct {
-	Deployment *appsv1.Deployment `json:"deployment"`
-}
-
-type DeploymentHelperService struct {
-	appmanager *ApplicationManager
-}
-
-func NewDeploymentHelperWebService(appmanager *ApplicationManager) *DeploymentHelperService {
-	return &DeploymentHelperService{
-		appmanager: appmanager,
-	}
-}
-
-func (s *DeploymentHelperService) getDeployment(request *restful.Request, response *restful.Response) {
-	deploy, err := s.appmanager.deployLister.
-		Deployments(request.PathParameter("namespace")).
-		Get(request.PathParameter("name"))
-	if err != nil {
-		if errors.IsNotFound(err) {
-			response.WriteError(http.StatusNotFound, err)
-		} else {
-			response.WriteError(http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	response.WriteEntity(Deployment{Deployment: deploy})
-}
-
-func (s *DeploymentHelperService) listPodsForDeployment(request *restful.Request, response *restful.Response) {
-	deploy, err := s.appmanager.deployLister.
-		Deployments(request.PathParameter("namespace")).
-		Get(request.PathParameter("name"))
-	if err != nil {
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	selector, err := metav1.LabelSelectorAsSelector(deploy.Spec.Selector)
-	if err != nil {
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-	pods, err := s.appmanager.podLister.Pods(deploy.Namespace).List(selector)
-	if err != nil {
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-	response.WriteEntity(PodList{Pods: pods})
-}
-
-func (s *DeploymentHelperService) WebService() *restful.WebService {
-	ws := new(restful.WebService)
-
-	ws.Path("/api/v1/deployments").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
-
-	ws.Route(ws.GET("/pods/{namespace}/{name}").To(s.listPodsForDeployment).
-		Doc("list pods for deployment").
-		Param(ws.PathParameter("namespace", "namespace").DataType("string")).
-		Param(ws.PathParameter("name", "name").DataType("string")).
-		Writes(PodList{}).
-		Returns(200, "OK", PodList{}).
-		Returns(404, "Not Found", nil))
-
-	ws.Route(ws.GET("/{namespace}/{name}").To(s.getDeployment).
-		Doc("find a deployment").
-		Param(ws.PathParameter("namespace", "namespace").DataType("string")).
-		Param(ws.PathParameter("name", "name").DataType("string")).
-		Writes(Deployment{}).
-		Returns(200, "OK", Deployment{}).
-		Returns(404, "Not Found", nil))
-
-	return ws
 }

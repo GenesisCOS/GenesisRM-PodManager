@@ -1,4 +1,4 @@
-package podmanager
+package helper
 
 import (
 	"strconv"
@@ -31,7 +31,7 @@ func GetPodState(pod *corev1.Pod) types.PodState {
 	}
 }
 
-func GetServiceType(pod *corev1.Pod) types.PodServiceType {
+func GetPodServiceType(pod *corev1.Pod) types.PodServiceType {
 	serviceType, ok := pod.GetLabels()[types.SERVICE_TYPE_LABEL]
 	if !ok {
 		return types.SERVICE_TYPE_UNKNOWN
@@ -46,7 +46,7 @@ func GetServiceType(pod *corev1.Pod) types.PodServiceType {
 	return types.SERVICE_TYPE_UNKNOWN
 }
 
-func GetThrottleTarget(pod *corev1.Pod) float64 {
+func GetPodThrottleTarget(pod *corev1.Pod) float64 {
 	throttleTarget, err := strconv.ParseFloat(pod.GetLabels()[types.CPU_THROTTLE_TARGET_LABEL], 64)
 	if err != nil {
 		// 默认 throttled target 为0.1
