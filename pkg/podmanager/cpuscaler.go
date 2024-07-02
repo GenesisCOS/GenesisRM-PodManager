@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strconv"
 	"time"
 
 	statsv1 "github.com/containerd/cgroups/v3/cgroup2/stats"
@@ -13,7 +12,7 @@ import (
 
 	"swiftkube.io/swiftkube/pkg/helper"
 	"swiftkube.io/swiftkube/pkg/podmanager/sample"
-	"swiftkube.io/swiftkube/pkg/podmanager/types"
+	genesissdk "swiftkube.io/swiftkube/pkg/podmanager/sdk"
 )
 
 type CPUMetrics struct {
@@ -75,9 +74,9 @@ func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float6
 	throttleRatio := metrics.throttlingRateHistory.Last()
 	metrics.margin = max(0, metrics.margin+throttleRatio-throttleTarget)
 	if throttleRatio > alpha*throttleTarget { // scale up
-		currentQuota := float64(metrics.CurrentQuota) / float64(types.DefaultCPUPeriod)
+		currentQuota := float64(metrics.CurrentQuota) / float64(genesissdk.DefaultCPUPeriod)
 		if metrics.scaleDown {
-			lastQuota := float64(metrics.LastQuota) / float64(types.DefaultCPUPeriod)
+			lastQuota := float64(metrics.LastQuota) / float64(genesissdk.DefaultCPUPeriod)
 			quota = lastQuota + (lastQuota - currentQuota)
 		} else {
 			quota = currentQuota * (1 + throttleRatio - alpha*throttleTarget)
@@ -85,7 +84,7 @@ func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float6
 		metrics.scaleDown = false
 	} else { // scale down
 		proposed := metrics.usageHistory.Max() + metrics.margin*metrics.usageHistory.Stdev()
-		currentQuota := float64(metrics.CurrentQuota) / float64(types.DefaultCPUPeriod)
+		currentQuota := float64(metrics.CurrentQuota) / float64(genesissdk.DefaultCPUPeriod)
 		if proposed <= betaMax*currentQuota {
 			quota = max(betaMin*currentQuota, proposed)
 		} else {
@@ -93,11 +92,11 @@ func (s *CPUScaler) dynCalculateQuota(metrics *CPUMetrics, throttleTarget float6
 		}
 		metrics.scaleDown = true
 	}
-	quota = max(quota, types.DefaultMinCPULimit)
-	return uint64(math.Ceil(quota * float64(types.DefaultCPUPeriod)))
+	quota = max(quota, genesissdk.DefaultMinCPULimit)
+	return uint64(math.Ceil(quota * float64(genesissdk.DefaultCPUPeriod)))
 }
 
-func (s *CPUScaler) update(pInfo *PodInfo, quota uint64, metrics *CPUMetrics, state types.PodCPUState) {
+func (s *CPUScaler) update(pInfo *PodInfo, quota uint64, metrics *CPUMetrics, state genesissdk.PodCPUState) {
 	err := s.podmanager.UpdatePodCPUQuota(pInfo, quota)
 	if err != nil {
 		klog.ErrorS(err, "failed to update resource")
@@ -128,7 +127,7 @@ type updateAction struct {
 	quota              uint64
 	request            uint64
 	metrics            *CPUMetrics
-	state              types.PodCPUState
+	state              genesissdk.PodCPUState
 	ignoreResourcePool bool
 	cpuset             string
 }
@@ -158,46 +157,38 @@ func (s *CPUScaler) Start(ctx context.Context) {
 			pInfo := s.podmanager.PodInfo(pod)
 			if pInfo == nil {
 				delete(s.cpuMetrics, key)
-				continue
+				continue // 处理下一个Pod
 			}
 
 			serviceType := helper.GetPodServiceType(pInfo.Pod)
-			cpuset, ok := pod.GetLabels()[types.CPUSET_LABEL]
+			cpuset, ok := pod.GetLabels()[genesissdk.CPUSET_LABEL]
 			if !ok {
-				if serviceType == types.SERVICE_TYPE_BE {
-					cpuset = types.CPUSET_BE
-				} else if serviceType == types.SERVICE_TYPE_LC {
-					cpuset = types.CPUSET_LC
+				if serviceType == genesissdk.SERVICE_TYPE_BE {
+					cpuset = genesissdk.CPUSET_BE
+				} else if serviceType == genesissdk.SERVICE_TYPE_LC {
+					cpuset = genesissdk.CPUSET_LC
 				} else {
 					klog.ErrorS(fmt.Errorf("unknown service types %s", serviceType), "", "pod", pod.GetName(), "namespace", pod.GetNamespace())
-					continue
+					continue // 处理下一个Pod
 				}
 			}
 
-			state := pod.GetLabels()[types.STATE_LABEL]
-			endpoint := pod.GetLabels()[types.ENDPOINT_LABEL]
+			state := pod.GetLabels()[genesissdk.STATE_LABEL]
+			endpoint := pod.GetLabels()[genesissdk.ENDPOINT_LABEL]
 
 			// 不去计算BE任务的CPU quota
-			if serviceType == types.SERVICE_TYPE_BE {
+			if serviceType == genesissdk.SERVICE_TYPE_BE {
 				delete(s.cpuMetrics, key)
-				if cpuset == types.CPUSET_BE {
+				if cpuset == genesissdk.CPUSET_BE {
 					bePods = append(bePods, pInfo)
-				} else if cpuset == types.CPUSET_MIX {
+				} else if cpuset == genesissdk.CPUSET_MIX {
 					beMixPods = append(beMixPods, pInfo)
 				}
-				continue
+				continue // 处理下一个Pod
 			}
 
-			cpuRequestStr, ok := pod.GetLabels()["swiftkube.io/cpu-request"]
-			if !ok {
-				cpuRequestStr = "3000"
-			}
-			cpuRequest, err := strconv.ParseUint(cpuRequestStr, 10, 64)
-			if err != nil {
-				klog.Error(err)
-				cpuRequest = 3000
-			}
-			requestQuota := (float64(cpuRequest) / 1000) * float64(types.DefaultCPUPeriod)
+			cpuRequest, _ := helper.GetPodCPURequestOrDefault(pod, 3000)
+			requestQuota := (float64(cpuRequest) / 1000) * float64(genesissdk.DefaultCPUPeriod)
 
 			// 是否所有容器都ready了
 			allReady := true
@@ -215,7 +206,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				m.exist = true
 				metrics = m
 			} else {
-				metrics = NewCPUMetrics(types.DefaultMaxHistoryLength)
+				metrics = NewCPUMetrics(genesissdk.DefaultMaxHistoryLength)
 				s.cpuMetrics[key] = metrics
 			}
 
@@ -250,82 +241,82 @@ func (s *CPUScaler) Start(ctx context.Context) {
 			}
 
 			if metrics.LastQuota == 0 {
-				metrics.LastQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
-				metrics.CurrentQuota = uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+				metrics.LastQuota = uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod) * genesissdk.DefaultMaxCPULimit))
+				metrics.CurrentQuota = uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod) * genesissdk.DefaultMaxCPULimit))
 			}
 
-			if cpuset == types.CPUSET_MIX {
-				quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+			if cpuset == genesissdk.CPUSET_MIX {
+				quota := uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod) * genesissdk.DefaultMaxCPULimit))
 				updateActions = append(updateActions, &updateAction{
 					pInfo:              pInfo,
 					quota:              quota,
 					metrics:            metrics,
-					state:              types.CPU_MAX,
+					state:              genesissdk.CPU_MAX,
 					ignoreResourcePool: false,
 					cpuset:             cpuset,
 				})
-				continue
+				continue // 处理下一个Pod
 			}
 
 			if allReady {
-				if state == types.RR { // Ready-Running
+				if state == genesissdk.RR { // Ready-Running
 					quota := s.dynCalculateQuota(metrics, throttleTarget)
-					quota = min(uint64(math.Ceil(float64(types.DefaultCPUPeriod)*types.DefaultMaxCPULimit)), quota)
+					quota = min(uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod)*genesissdk.DefaultMaxCPULimit)), quota)
 					updateActions = append(updateActions, &updateAction{
 						pInfo:              pInfo,
 						quota:              quota,
 						request:            uint64(requestQuota),
 						metrics:            metrics,
-						state:              types.CPU_DYNAMIC_OVERPROVISION,
+						state:              genesissdk.CPU_DYNAMIC_OVERPROVISION,
 						ignoreResourcePool: false,
 						cpuset:             cpuset,
 					})
 
-				} else if state == types.Init || state == types.WU { // Initializing WarmingUp Ready-FullSpeed
-					quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+				} else if state == genesissdk.Init || state == genesissdk.WU { // Initializing WarmingUp Ready-FullSpeed
+					quota := uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod) * genesissdk.DefaultMaxCPULimit))
 					updateActions = append(updateActions, &updateAction{
 						pInfo:              pInfo,
 						quota:              quota,
 						request:            uint64(requestQuota),
 						metrics:            metrics,
-						state:              types.CPU_MAX,
+						state:              genesissdk.CPU_MAX,
 						ignoreResourcePool: true,
 						cpuset:             cpuset,
 					})
 
-				} else if state == types.RFS {
-					quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+				} else if state == genesissdk.RFS {
+					quota := uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod) * genesissdk.DefaultMaxCPULimit))
 					updateActions = append(updateActions, &updateAction{
 						pInfo:              pInfo,
 						quota:              quota,
 						request:            uint64(requestQuota),
 						metrics:            metrics,
-						state:              types.CPU_MAX,
+						state:              genesissdk.CPU_MAX,
 						ignoreResourcePool: false,
 						cpuset:             cpuset,
 					})
 
-				} else if state == types.RCN || state == types.RLN { // Ready-CatNap Ready-LongNap
-					if endpoint == string(types.ENDPOINT_DOWN) {
+				} else if state == genesissdk.RCN || state == genesissdk.RLN { // Ready-CatNap Ready-LongNap
+					if endpoint == string(genesissdk.ENDPOINT_DOWN) {
 						quota := s.dynCalculateQuota(metrics, 0.7)
-						quota = min(uint64(math.Ceil(float64(types.DefaultCPUPeriod)*types.DefaultMaxCPULimit)), quota)
+						quota = min(uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod)*genesissdk.DefaultMaxCPULimit)), quota)
 						updateActions = append(updateActions, &updateAction{
 							pInfo:              pInfo,
 							quota:              quota,
 							request:            uint64(requestQuota),
 							metrics:            metrics,
-							state:              types.CPU_DYNAMIC_RESOURCE_EFFICIENT,
+							state:              genesissdk.CPU_DYNAMIC_RESOURCE_EFFICIENT,
 							ignoreResourcePool: false,
-							cpuset:             types.CPUSET_BE, // RCN与RLN Pod自动转为BE cpuset
+							cpuset:             genesissdk.CPUSET_BE, // RCN与RLN Pod自动转为BE cpuset
 						})
 					} else {
-						quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+						quota := uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod) * genesissdk.DefaultMaxCPULimit))
 						updateActions = append(updateActions, &updateAction{
 							pInfo:              pInfo,
 							quota:              quota,
 							request:            uint64(requestQuota),
 							metrics:            metrics,
-							state:              types.CPU_MAX,
+							state:              genesissdk.CPU_MAX,
 							ignoreResourcePool: false,
 							cpuset:             cpuset,
 						})
@@ -333,29 +324,29 @@ func (s *CPUScaler) Start(ctx context.Context) {
 				}
 			} else {
 				// 如果Pod中存在容器没有ready，我们希望容器能够快速完成初始化
-				quota := uint64(math.Ceil(float64(types.DefaultCPUPeriod) * types.DefaultMaxCPULimit))
+				quota := uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod) * genesissdk.DefaultMaxCPULimit))
 				updateActions = append(updateActions, &updateAction{
 					pInfo:              pInfo,
 					quota:              quota,
 					request:            uint64(requestQuota),
 					metrics:            metrics,
-					state:              types.CPU_MAX,
+					state:              genesissdk.CPU_MAX,
 					ignoreResourcePool: true,
 					cpuset:             cpuset,
 				})
 			}
-		}
+		} // for _, pod := range localPods
 
 		var totalRequestLCCores float64 = 0
 		var totalRequestMixCores float64 = 0
 		// updateActions 中全部为 LC Pod
 		for _, action := range updateActions {
-			allocateCores := float64(action.quota) / float64(types.DefaultCPUPeriod)
-			requestCores := float64(action.request) / float64(types.DefaultCPUPeriod)
+			allocateCores := float64(action.quota) / float64(genesissdk.DefaultCPUPeriod)
+			requestCores := float64(action.request) / float64(genesissdk.DefaultCPUPeriod)
 			switch action.cpuset {
-			case types.CPUSET_MIX:
+			case genesissdk.CPUSET_MIX:
 				totalRequestMixCores += min(requestCores, allocateCores) // MIX cpuset中的LC Pod
-			case types.CPUSET_LC:
+			case genesissdk.CPUSET_LC:
 				totalRequestLCCores += min(requestCores, allocateCores) // LC cpuset中的LC Pod
 			default:
 			}
@@ -368,7 +359,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 		totalRequestLCCoresInt := uint64(math.Ceil(totalRequestLCCores))
 		// update LC pods cpu resources
 		for _, action := range updateActions {
-			if action.cpuset == types.CPUSET_LC {
+			if action.cpuset == genesissdk.CPUSET_LC {
 				s.podmanager.UpdatePodCPUSetFromLower(action.pInfo, totalRequestLCCoresInt)
 			}
 			s.update(action.pInfo, action.quota, action.metrics, action.state)
@@ -380,17 +371,17 @@ func (s *CPUScaler) Start(ctx context.Context) {
 		mixCpusetRangeEnd := min(s.podmanager.Cores-1, totalRequestLCCoresInt+totalRequestMixCoresInt-1)
 		for _, action := range updateActions {
 			if mixCpusetRangeEnd >= mixCpusetRangeStart {
-				if action.cpuset == types.CPUSET_MIX {
+				if action.cpuset == genesissdk.CPUSET_MIX {
 					s.podmanager.UpdatePodCPUSetRange(action.pInfo, mixCpusetRangeStart, mixCpusetRangeEnd)
 				}
 				s.update(
 					action.pInfo,
-					uint64(math.Ceil(float64(types.DefaultCPUPeriod)*types.DefaultMaxCPULimit)),
+					uint64(math.Ceil(float64(genesissdk.DefaultCPUPeriod)*genesissdk.DefaultMaxCPULimit)),
 					action.metrics,
 					action.state,
 				)
 			} else {
-				if action.cpuset == types.CPUSET_LC {
+				if action.cpuset == genesissdk.CPUSET_LC {
 					s.podmanager.UpdatePodCPUSetFromLower(action.pInfo, totalRequestLCCoresInt)
 				}
 				s.update(action.pInfo, action.quota, action.metrics, action.state)
@@ -407,7 +398,7 @@ func (s *CPUScaler) Start(ctx context.Context) {
 		mixCores = max(mixCores, minBeCores)
 
 		for _, action := range updateActions {
-			if action.cpuset == types.CPUSET_BE {
+			if action.cpuset == genesissdk.CPUSET_BE {
 				s.podmanager.UpdatePodCPUSetFromUpper(action.pInfo, mixCores)
 			}
 		}

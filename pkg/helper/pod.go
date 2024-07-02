@@ -31,6 +31,22 @@ func GetPodState(pod *corev1.Pod) types.PodState {
 	}
 }
 
+func GetPodEndpointState(pod *corev1.Pod) types.PodEndpointState {
+	endpoint, ok := pod.GetLabels()[types.ENDPOINT_LABEL]
+	if !ok {
+		return types.ENDPOINT_UNKNOWN
+	}
+
+	switch endpoint {
+	case string(types.ENDPOINT_DOWN):
+		return types.ENDPOINT_DOWN
+	case string(types.ENDPOINT_UP):
+		return types.ENDPOINT_UP
+	default:
+		return types.ENDPOINT_UNKNOWN
+	}
+}
+
 func GetPodServiceType(pod *corev1.Pod) types.PodServiceType {
 	serviceType, ok := pod.GetLabels()[types.SERVICE_TYPE_LABEL]
 	if !ok {
@@ -55,14 +71,14 @@ func GetPodThrottleTarget(pod *corev1.Pod) float64 {
 	return throttleTarget
 }
 
-func GetPodCPURequest(pod *corev1.Pod) (uint64, error) {
+func GetPodCPURequestOrDefault(pod *corev1.Pod, def uint64) (uint64, error) {
 	cpuRequestStr, ok := pod.GetLabels()["swiftkube.io/cpu-request"]
 	if !ok {
-		return 0, nil
+		return def, nil
 	}
 	cpuRequest, err := strconv.ParseUint(cpuRequestStr, 10, 64)
 	if err != nil {
-		return 0, err
+		return def, err
 	}
 	return cpuRequest, nil
 }

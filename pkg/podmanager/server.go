@@ -31,7 +31,7 @@ import (
 
 	cgroup "swiftkube.io/swiftkube/pkg/cgroup"
 	"swiftkube.io/swiftkube/pkg/helper"
-	"swiftkube.io/swiftkube/pkg/podmanager/types"
+	genesissdk "swiftkube.io/swiftkube/pkg/podmanager/sdk"
 )
 
 type ContainerInfo struct {
@@ -43,8 +43,8 @@ type PodInfo struct {
 	Pod            *corev1.Pod
 	PodResource    PodResource
 	Cgroup         *cgroup.Cgroup
-	CPUState       types.PodCPUState
-	MemoryState    types.PodMemoryState
+	CPUState       genesissdk.PodCPUState
+	MemoryState    genesissdk.PodMemoryState
 	ContainerInfos []*ContainerInfo
 }
 
@@ -276,7 +276,7 @@ func (c *PodManager) ListAllLocalPods() ([]*corev1.Pod, error) {
 
 func (c *PodManager) ListControlledLocalPods() ([]*corev1.Pod, error) {
 	selector := labels.NewSelector()
-	requirement, err := labels.NewRequirement(types.ENABLED_LABEL, selection.Equals, []string{"true"})
+	requirement, err := labels.NewRequirement(genesissdk.ENABLED_LABEL, selection.Equals, []string{"true"})
 	if err != nil {
 		klog.Error(err)
 		return nil, err
@@ -286,27 +286,27 @@ func (c *PodManager) ListControlledLocalPods() ([]*corev1.Pod, error) {
 }
 
 func (c *PodManager) IsPodControlledByGenesis(pod *corev1.Pod) bool {
-	enabled, ok := pod.GetLabels()[types.ENABLED_LABEL]
+	enabled, ok := pod.GetLabels()[genesissdk.ENABLED_LABEL]
 	return ok && enabled == "true"
 }
 
 func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
-	state := pod.GetLabels()[types.STATE_LABEL]
-	endpoint := pod.GetLabels()[types.ENDPOINT_LABEL]
+	state := pod.GetLabels()[genesissdk.STATE_LABEL]
+	endpoint := pod.GetLabels()[genesissdk.ENDPOINT_LABEL]
 
 	// (state == WarmingUp or Ready-FullSpeed) and endpoint == Down
-	if (state == string(types.WU) || state == string(types.RFS)) && endpoint == string(types.ENDPOINT_DOWN) {
+	if (state == string(genesissdk.WU) || state == string(genesissdk.RFS)) && endpoint == string(genesissdk.ENDPOINT_DOWN) {
 		for {
 			t := time.NewTimer(500 * time.Millisecond)
 			// TODO
 			//if c.GetPodInfo(key).cpuState == CPU_MAX && c.GetPodInfo(key).memoryState == MEMORY_MAX {
-			if c.GetPodInfo(key).CPUState == types.CPU_MAX {
+			if c.GetPodInfo(key).CPUState == genesissdk.CPU_MAX {
 				break
 			}
 			<-t.C
 		}
 
-		pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
+		pod.GetLabels()[genesissdk.ENDPOINT_LABEL] = string(genesissdk.ENDPOINT_UP)
 		for {
 			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
 			if err == nil {
@@ -320,23 +320,23 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 					return
 				}
 				pod = pod.DeepCopy()
-				pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
+				pod.GetLabels()[genesissdk.ENDPOINT_LABEL] = string(genesissdk.ENDPOINT_UP)
 			}
 		}
 	}
 
 	// state == Ready-Running and endpoint == Down
-	if state == string(types.RR) && endpoint == string(types.ENDPOINT_DOWN) {
+	if state == string(genesissdk.RR) && endpoint == string(genesissdk.ENDPOINT_DOWN) {
 		for {
 			t := time.NewTimer(500 * time.Millisecond)
 			//if c.GetPodInfo(key).cpuState == CPU_DYNAMIC_OVERPROVISION && c.GetPodInfo(key).memoryState == MEMORY_MAX {
-			if c.GetPodInfo(key).CPUState == types.CPU_DYNAMIC_OVERPROVISION {
+			if c.GetPodInfo(key).CPUState == genesissdk.CPU_DYNAMIC_OVERPROVISION {
 				break
 			}
 			<-t.C
 		}
 
-		pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
+		pod.GetLabels()[genesissdk.ENDPOINT_LABEL] = string(genesissdk.ENDPOINT_UP)
 		for {
 			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
 			if err == nil {
@@ -350,14 +350,14 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 					return
 				}
 				pod = pod.DeepCopy()
-				pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
+				pod.GetLabels()[genesissdk.ENDPOINT_LABEL] = string(genesissdk.ENDPOINT_UP)
 			}
 		}
 	}
 
 	// (state == Ready-CatNap or Ready-LongNap) and endpoint == Up
-	if (state == string(types.RCN) || state == string(types.RLN)) && endpoint == string(types.ENDPOINT_UP) {
-		pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_DOWN)
+	if (state == string(genesissdk.RCN) || state == string(genesissdk.RLN)) && endpoint == string(genesissdk.ENDPOINT_UP) {
+		pod.GetLabels()[genesissdk.ENDPOINT_LABEL] = string(genesissdk.ENDPOINT_DOWN)
 		for {
 			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
 			if err == nil {
@@ -371,7 +371,7 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 					return
 				}
 				pod = pod.DeepCopy()
-				pod.GetLabels()[types.ENDPOINT_LABEL] = string(types.ENDPOINT_UP)
+				pod.GetLabels()[genesissdk.ENDPOINT_LABEL] = string(genesissdk.ENDPOINT_UP)
 			}
 		}
 	}
@@ -439,9 +439,9 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 	}
 
 	serviceType := helper.GetPodServiceType(pod)
-	if serviceType == types.SERVICE_TYPE_UNKNOWN {
+	if serviceType == genesissdk.SERVICE_TYPE_UNKNOWN {
 		// 默认所有Pod都是LC的
-		serviceType = types.SERVICE_TYPE_LC
+		serviceType = genesissdk.SERVICE_TYPE_LC
 	}
 
 	var pInfo *PodInfo
@@ -455,9 +455,9 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 	var podMap *sync.Map = nil
 	if c.IsPodControlledByGenesis(pod) {
 		c.syncPodState(pod, key)
-		if serviceType == types.SERVICE_TYPE_LC {
+		if serviceType == genesissdk.SERVICE_TYPE_LC {
 			podMap = &c.LCPodMap
-		} else if serviceType == types.SERVICE_TYPE_BE {
+		} else if serviceType == genesissdk.SERVICE_TYPE_BE {
 			podMap = &c.BEPodMap
 		}
 	} else {
@@ -466,8 +466,8 @@ func (c *PodManager) syncHandler(_ context.Context, key string) error {
 	v, loaded = podMap.LoadOrStore(key, &PodInfo{
 		Pod:            pod.DeepCopy(),
 		Cgroup:         podCgroup,
-		CPUState:       types.CPU_UNKNOWN,
-		MemoryState:    types.MEMORY_UNKNOWN,
+		CPUState:       genesissdk.CPU_UNKNOWN,
+		MemoryState:    genesissdk.MEMORY_UNKNOWN,
 		ContainerInfos: containerInfos,
 	})
 	pInfo = v.(*PodInfo)
@@ -511,7 +511,7 @@ func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
 		kubernetesContainerMetrics = append(kubernetesContainerMetrics, cm)
 	}
 
-	cpuRequest, err := helper.GetPodCPURequest(pInfo.Pod)
+	cpuRequest, err := helper.GetPodCPURequestOrDefault(pInfo.Pod, 0)
 	if err != nil {
 		c.GetRecorder().Event(pInfo.Pod, corev1.EventTypeWarning, "CollectingMetrics", err.Error())
 	}
@@ -538,7 +538,7 @@ func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
 }
 
 func (c *PodManager) NodeResourceInfo() *ResourceInfo {
-	totalCPU := uint64(runtime.NumCPU() * int(types.DefaultCPUPeriod))
+	totalCPU := uint64(runtime.NumCPU() * int(genesissdk.DefaultCPUPeriod))
 	totalAllocatableCPU := uint64(float64(totalCPU) * 0.9)
 	allocatable := totalAllocatableCPU
 
@@ -563,7 +563,7 @@ func (c *PodManager) CollectNodeMetrics() *NodeMetrics {
 	resourceInfo := c.NodeResourceInfo()
 	return &NodeMetrics{
 		NodeName:       c.NodeName,
-		AllocatableCPU: uint64(float64(resourceInfo.CPU.Allocatable) / float64(types.DefaultCPUPeriod)),
+		AllocatableCPU: uint64(float64(resourceInfo.CPU.Allocatable) / float64(genesissdk.DefaultCPUPeriod)),
 	}
 }
 

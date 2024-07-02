@@ -19,7 +19,6 @@ require (
 	github.com/containerd/cgroups/v3 v3.0.3
 	github.com/emicklei/go-restful/v3 v3.12.0
 	github.com/moby/ipvs v1.1.0
-	github.com/prometheus/client_golang v1.19.1
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
 	gonum.org/v1/gonum v0.15.0
@@ -136,6 +135,7 @@ require (
 	github.com/opencontainers/selinux v1.10.0 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/prometheus/client_golang v1.19.1 // indirect
 	github.com/prometheus/client_model v0.5.0 // indirect
 	github.com/prometheus/common v0.48.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect

@@ -28,8 +28,9 @@ const (
 	POD_WARMINGUP_STATE       PodState = "WarmingUp"
 	POD_UNKNOWN_STATE         PodState = "Unknown"
 
-	ENDPOINT_UP   PodEndpointState = "Up"
-	ENDPOINT_DOWN PodEndpointState = "Down"
+	ENDPOINT_UP      PodEndpointState = "Up"
+	ENDPOINT_DOWN    PodEndpointState = "Down"
+	ENDPOINT_UNKNOWN PodEndpointState = "Unknown"
 )
 
 type PodServiceType string
@@ -39,9 +40,10 @@ func (st PodServiceType) String() string {
 }
 
 const (
-	DefaultCPUPeriod   uint64  = 100000 // us
-	DefaultMaxCPULimit float64 = 3      // core
-	DefaultMinCPULimit float64 = 0.1    // core
+	DefaultCPUPeriod   uint64  = 100000                  // 100000 us
+	DefaultMaxCPULimit float64 = 3                       // 3 core
+	DefaultMinCPULimit float64 = 0.1                     // 0.1 core
+	DefaultMemoryHigh  int64   = 10 * 1024 * 1024 * 1024 // 10 GiB
 
 	RR   = "Ready-Running"
 	RCN  = "Ready-CatNap"

@@ -8,7 +8,7 @@ import (
 	"k8s.io/klog/v2"
 	cgroup "swiftkube.io/swiftkube/pkg/cgroup"
 
-	"swiftkube.io/swiftkube/pkg/podmanager/types"
+	genesissdk "swiftkube.io/swiftkube/pkg/podmanager/sdk"
 )
 
 type PodCPUResource struct {
@@ -33,7 +33,7 @@ func (c *PodManager) UpdateContainerGroupCPUResource(group string, quota uint64)
 	var err error = nil
 	cg := cgroup.GetContainerGroupCgroup(group)
 	if cg != nil {
-		period := types.DefaultCPUPeriod
+		period := genesissdk.DefaultCPUPeriod
 		int64Quota := int64(quota)
 		err = cg.Control.Update(&cgroup2.Resources{
 			CPU: &cgroup2.CPU{
@@ -103,11 +103,24 @@ func (c *PodManager) UpdatePodCPUSet(pInfo *PodInfo, cpus []uint64) error {
 
 func (c *PodManager) UpdatePodCPUQuota(pInfo *PodInfo, quota uint64) error {
 	int64Quota := int64(quota)
-	period := types.DefaultCPUPeriod
+	period := genesissdk.DefaultCPUPeriod
 
 	err := pInfo.Cgroup.Control.Update(&cgroup2.Resources{
 		CPU: &cgroup2.CPU{
 			Max: cgroup2.NewCPUMax(&int64Quota, &period),
+		},
+	})
+	if err != nil {
+		klog.Error(err)
+	}
+
+	return err
+}
+
+func (c *PodManager) UpdatePodMemoryHigh(pInfo *PodInfo, value int64) error {
+	err := pInfo.Cgroup.Control.Update(&cgroup2.Resources{
+		Memory: &cgroup2.Memory{
+			High: &value,
 		},
 	})
 	if err != nil {
