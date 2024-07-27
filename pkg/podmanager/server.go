@@ -291,11 +291,11 @@ func (c *PodManager) IsPodControlledByGenesis(pod *corev1.Pod) bool {
 }
 
 func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
-	state := pod.GetLabels()[genesissdk.STATE_LABEL]
-	endpoint := pod.GetLabels()[genesissdk.ENDPOINT_LABEL]
+	state := helper.GetPodState(pod)
+	endpoint := helper.GetPodEndpointState(pod)
 
 	// (state == WarmingUp or Ready-FullSpeed) and endpoint == Down
-	if (state == string(genesissdk.WU) || state == string(genesissdk.RFS)) && endpoint == string(genesissdk.ENDPOINT_DOWN) {
+	if (state == genesissdk.WU || state == genesissdk.RFS) && endpoint == genesissdk.ENDPOINT_DOWN {
 		for {
 			t := time.NewTimer(500 * time.Millisecond)
 			// TODO
@@ -326,7 +326,7 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 	}
 
 	// state == Ready-Running and endpoint == Down
-	if state == string(genesissdk.RR) && endpoint == string(genesissdk.ENDPOINT_DOWN) {
+	if state == genesissdk.RR && endpoint == genesissdk.ENDPOINT_DOWN {
 		for {
 			t := time.NewTimer(500 * time.Millisecond)
 			//if c.GetPodInfo(key).cpuState == CPU_DYNAMIC_OVERPROVISION && c.GetPodInfo(key).memoryState == MEMORY_MAX {
@@ -356,14 +356,14 @@ func (c *PodManager) syncPodState(pod *corev1.Pod, key string) {
 	}
 
 	// (state == Ready-CatNap or Ready-LongNap) and endpoint == Up
-	if (state == string(genesissdk.RCN) || state == string(genesissdk.RLN)) && endpoint == string(genesissdk.ENDPOINT_UP) {
+	if (state == genesissdk.RCN || state == genesissdk.RLN) && endpoint == genesissdk.ENDPOINT_UP {
 		pod.GetLabels()[genesissdk.ENDPOINT_LABEL] = string(genesissdk.ENDPOINT_DOWN)
 		for {
 			_, err := c.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, v1.UpdateOptions{})
 			if err == nil {
 				break
 			} else {
-				klog.ErrorS(err, "Fail to update pod. retry ...")
+				klog.ErrorS(err, "fail to update pod. retry ...")
 				pod, err = c.PodLister.Pods(pod.Namespace).Get(pod.Name)
 				if errors.IsNotFound(err) {
 					utilruntime.HandleError(fmt.Errorf("pod '%s' in work queue no longer exists", key))
@@ -486,6 +486,7 @@ func (c *PodManager) collectPodMetrics(pInfo *PodInfo) (*PodMetrics, error) {
 
 	podCPUQuota, podCPUPeriod, err := pInfo.Cgroup.GetCPUQuotaAndPeriod()
 	if err != nil {
+		klog.ErrorS(err, "get CPU quota and period failed")
 		return nil, err
 	}
 
@@ -614,10 +615,8 @@ func (m *PodManager) Run(ctx context.Context) error {
 		go wait.UntilWithContext(ctx, m.runWorker, time.Second)
 	}
 
-	cpuScaler := NewCPUScaler(m)
-
-	logger.Info("Start CPU scaler")
-	go cpuScaler.Start(context.TODO())
+	resourceController := NewResourceController(m)
+	go resourceController.Start(context.TODO())
 
 	server := &http.Server{
 		Addr:         "0.0.0.0:10000",

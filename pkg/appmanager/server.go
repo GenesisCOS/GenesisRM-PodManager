@@ -28,6 +28,9 @@ import (
 )
 
 type ApplicationManager struct {
+	kubeclient          kubernetes.Interface
+	kubeinformerfactory kubeinformers.SharedInformerFactory
+
 	podInformer coreinformers.PodInformer
 	podLister   corelisters.PodLister
 	podSynced   cache.InformerSynced
@@ -44,25 +47,13 @@ type ApplicationManager struct {
 func (manager *ApplicationManager) Run(ctx context.Context) error {
 	logger := klog.FromContext(ctx)
 
-	logger.Info("Waiting for informer caches to sync")
-
-	if ok := cache.WaitForCacheSync(
-		ctx.Done(),
-		manager.podSynced,
-		manager.deploySynced,
-		manager.nodeSynced); !ok {
-		return fmt.Errorf("failed to wait for caches to sync")
-	}
-
 	server := &http.Server{
 		Addr:         "0.0.0.0:10001",
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/stat", &statHandler{
-		appmanager: manager,
-	})
+	mux.Handle("/stat", &statHandler{appmanager: manager})
 
 	server.Handler = mux
 	go server.ListenAndServe()
@@ -72,6 +63,17 @@ func (manager *ApplicationManager) Run(ctx context.Context) error {
 
 	restful.DefaultContainer.Add(deployHelperWS.WebService())
 	restful.DefaultContainer.Add(nodeHelperWS.WebService())
+
+	manager.kubeinformerfactory.Start(ctx.Done())
+	logger.Info("Waiting for informer caches to sync")
+	if ok := cache.WaitForCacheSync(
+		ctx.Done(),
+		manager.podSynced,
+		manager.deploySynced,
+		manager.nodeSynced); !ok {
+		return fmt.Errorf("failed to wait for caches to sync")
+	}
+
 	log.Fatal(http.ListenAndServe(":10000", nil))
 
 	<-ctx.Done()
@@ -158,10 +160,10 @@ func NewApplicationManagerCommand() *cobra.Command {
 				cfg: cfg,
 			}
 
-			kubeClient := clientBuilder.KubeClientOrDie()
+			kubeclient := clientBuilder.KubeClientOrDie()
 			//skClient := clientBuilder.SkClientOrDie()
 
-			kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
+			kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeclient, time.Second*30)
 			//skInformerFactory := skinformers.NewSharedInformerFactory(skClient, time.Second*30)
 
 			podInformer := kubeInformerFactory.Core().V1().Pods()
@@ -169,6 +171,9 @@ func NewApplicationManagerCommand() *cobra.Command {
 			nodeInformer := kubeInformerFactory.Core().V1().Nodes()
 
 			appManager := &ApplicationManager{
+				kubeclient:          kubeclient,
+				kubeinformerfactory: kubeInformerFactory,
+
 				podInformer: podInformer,
 				podLister:   podInformer.Lister(),
 				podSynced:   podInformer.Informer().HasSynced,
@@ -191,7 +196,6 @@ func NewApplicationManagerCommand() *cobra.Command {
 
 			//startController(ctx, controllerContext)
 
-			kubeInformerFactory.Start(ctx.Done())
 			//skInformerFactory.Start(ctx.Done())
 
 			return appManager.Run(ctx)

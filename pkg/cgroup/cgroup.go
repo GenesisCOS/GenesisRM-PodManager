@@ -194,9 +194,10 @@ func (cg *Cgroup) GetCPUQuotaAndPeriod() (int64, uint64, error) {
 	if len(vs) != 2 {
 		return 0, 0, fmt.Errorf("parse cpu.max failed")
 	}
+
 	var quota int64
 	if vs[0] == "max" {
-		quota = -1
+		quota = 0
 	} else {
 		quota, err = strconv.ParseInt(vs[0], 10, 64)
 		if err != nil {

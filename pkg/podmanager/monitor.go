@@ -3,6 +3,7 @@ package podmanager
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"swiftkube.io/swiftkube/pkg/helper"
 )
@@ -19,23 +20,26 @@ func (c *Monitor) parseNodeMetricsResponse(metrics *NodeMetrics) []byte {
 }
 
 func parsePodMetric(name string, value float64, labels map[string]string, pInfo *PodInfo) string {
-	/* 这段代码pod label的顺序可能再每次查询的时候都不一样
-	一旦不一样就会生成一条新的时序数据
-	podLabelString := ""
-	for k, v := range pInfo.Pod.GetLabels() {
-		if podLabelString != "" {
-			podLabelString += ","
+
+	// 是否所有容器都ready了
+	allReady := true
+	for _, containerStatus := range pInfo.Pod.Status.ContainerStatuses {
+		if !containerStatus.Ready {
+			allReady = false
+			break
 		}
-		podLabelString += fmt.Sprintf("%s=%s", k, v)
 	}
-	labels["podlabels"] = podLabelString
-	*/
 
 	labels["podname"] = pInfo.Pod.GetName()
 	labels["namespace"] = pInfo.Pod.GetNamespace()
 	labels["nodename"] = pInfo.Pod.Spec.NodeName
 	labels["state"] = helper.GetPodState(pInfo.Pod).String()
 	labels["serviceType"] = helper.GetPodServiceType(pInfo.Pod).String()
+	service, ok := pInfo.Pod.GetLabels()["swiftkube.io/service"]
+	if ok {
+		labels["service"] = service
+	}
+	labels["ready"] = strconv.FormatBool(allReady)
 
 	labelString := ""
 	for k, v := range labels {

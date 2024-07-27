@@ -76,16 +76,23 @@ install_all: create_serviceaccount
 install_monitor: create_serviceaccount
 	kubectl apply -f kubernetes/swift-monitor.yaml 
 
-push_podmanager: build_podmanager 
+stop_podmanager_systemd:
+	-ansible myhosts -i ansible.ini -m shell -a "systemctl stop podmanager"
+
+copy_podmanager: stop_podmanager_systemd build_podmanager
+	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
+	ansible myhosts -i ansible.ini -m shell -a "chmod +x /usr/local/bin/podmanager"
+
+push_podmanager: copy_podmanager 
 	ansible myhosts -i ansible.ini -m copy -a "src=${OUTPUT}/podmanager dest=/usr/local/bin/podmanager"
 	ansible myhosts -i ansible.ini -m copy -a "src=podmanager.service dest=/usr/lib/systemd/system/podmanager.service"
-	ansible myhosts -i ansible.ini -m shell -a "systemctl daemon-reload && chmod +x /usr/local/bin/podmanager"
+	ansible myhosts -i ansible.ini -m shell -a "systemctl daemon-reload"
 
 setup_podmanager: push_podmanager
 	ansible myhosts -i ansible.ini -m shell -a "systemctl restart podmanager && systemctl status podmanager"
 
 stop_podmanager:
-	ansible myhosts -i ansible.ini -m shell -a "systemctl stop podmanager"
+	ansible allhosts -i ansible.ini -m shell -a "systemctl stop podmanager && systemctl disable podmanager && rm -f /usr/lib/systemd/system/podmanager.service && systemctl daemon-reload"
 
 setup_appmanager: build_appmanager
 	-tmux kill-session -t appmanager

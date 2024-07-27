@@ -101,13 +101,21 @@ func (c *PodManager) UpdatePodCPUSet(pInfo *PodInfo, cpus []uint64) error {
 	return err
 }
 
+// UpdatePodCPUQuota quota为0时为max
 func (c *PodManager) UpdatePodCPUQuota(pInfo *PodInfo, quota uint64) error {
 	int64Quota := int64(quota)
 	period := genesissdk.DefaultCPUPeriod
 
+	var cpuMax cgroup2.CPUMax
+	if int64Quota > 0 {
+		cpuMax = cgroup2.NewCPUMax(&int64Quota, &period)
+	} else {
+		cpuMax = cgroup2.NewCPUMax(nil, &period)
+	}
+
 	err := pInfo.Cgroup.Control.Update(&cgroup2.Resources{
 		CPU: &cgroup2.CPU{
-			Max: cgroup2.NewCPUMax(&int64Quota, &period),
+			Max: cpuMax,
 		},
 	})
 	if err != nil {

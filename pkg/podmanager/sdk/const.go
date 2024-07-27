@@ -44,6 +44,7 @@ const (
 	DefaultMaxCPULimit float64 = 3                       // 3 core
 	DefaultMinCPULimit float64 = 0.1                     // 0.1 core
 	DefaultMemoryHigh  int64   = 10 * 1024 * 1024 * 1024 // 10 GiB
+	CPUQuotaUnlimited  uint64  = 0
 
 	RR   = "Ready-Running"
 	RCN  = "Ready-CatNap"
@@ -66,8 +67,9 @@ const (
 	SERVICE_TYPE_BE      PodServiceType = "be-service"
 	SERVICE_TYPE_UNKNOWN PodServiceType = "unknown-service"
 
-	CPUSET_LC      = "lc-cpuset"
-	CPUSET_BE      = "be-cpuset"
-	CPUSET_MIX     = "mix-cpuset"
-	CPUSET_UNKNOWN = "unknown-cpuset"
+	CPUSET_LC       = "lc-cpuset"
+	CPUSET_BE       = "be-cpuset"
+	CPUSET_MIX      = "mix-cpuset"
+	CPUSET_ULIMITED = "ulimited-cpuset"
+	CPUSET_UNKNOWN  = "unknown-cpuset"
 )

@@ -12,22 +12,17 @@ import (
 	genesissdk "swiftkube.io/swiftkube/pkg/podmanager/sdk"
 )
 
-var swapfiles []string = []string{
-	"/dev/mapper/openeuler-swap",
-	"/data/swapfile",
-}
-
-type MemScaler struct {
+type MemController struct {
 	podmanager *PodManager
 }
 
-func NewMemScaler(podmanager *PodManager) *MemScaler {
-	return &MemScaler{
+func NewMemController(podmanager *PodManager) *MemController {
+	return &MemController{
 		podmanager: podmanager,
 	}
 }
 
-func (s *MemScaler) reloadSwappages(pids []uint64) {
+func (s *MemController) reloadSwappages(pids []uint64) {
 	if len(pids) == 0 {
 		return
 	}
@@ -38,10 +33,12 @@ func (s *MemScaler) reloadSwappages(pids []uint64) {
 		params = append(params, strconv.FormatUint(pid, 10))
 	}
 
-	for _, swapfile := range swapfiles {
-		params = append(params, "-f")
-		params = append(params, swapfile)
-	}
+	/*
+		for _, swapfile := range swapfiles {
+			params = append(params, "-f")
+			params = append(params, swapfile)
+		}
+	*/
 
 	cmd := exec.Command(
 		"reloadswappage", params...,
@@ -58,7 +55,7 @@ func (s *MemScaler) reloadSwappages(pids []uint64) {
 	}
 }
 
-func (s *MemScaler) Start(ctx context.Context) {
+func (s *MemController) Start(ctx context.Context) {
 	klog.InfoS("Memory Scaler started")
 	timer := time.NewTimer(time.Second)
 

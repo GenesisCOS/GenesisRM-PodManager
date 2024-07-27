@@ -4,66 +4,66 @@ import (
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
-	"swiftkube.io/swiftkube/pkg/podmanager/types"
+	genesissdk "swiftkube.io/swiftkube/pkg/podmanager/sdk"
 )
 
-func GetPodState(pod *corev1.Pod) types.PodState {
-	state, ok := pod.GetLabels()[types.STATE_LABEL]
+func GetPodState(pod *corev1.Pod) genesissdk.PodState {
+	state, ok := pod.GetLabels()[genesissdk.STATE_LABEL]
 	if !ok {
-		return types.POD_UNKNOWN_STATE
+		return genesissdk.POD_UNKNOWN_STATE
 	}
 
 	switch state {
-	case types.POD_READY_FULLSPEED_STATE.String():
-		return types.POD_READY_FULLSPEED_STATE
-	case types.POD_READY_CATNAP_STATE.String():
-		return types.POD_READY_CATNAP_STATE
-	case types.POD_READY_RUNNING_STATE.String():
-		return types.POD_READY_RUNNING_STATE
-	case types.POD_READY_LONGNAP_STATE.String():
-		return types.POD_READY_LONGNAP_STATE
-	case types.POD_INITIALIZING_STATE.String():
-		return types.POD_INITIALIZING_STATE
-	case types.POD_WARMINGUP_STATE.String():
-		return types.POD_WARMINGUP_STATE
+	case genesissdk.POD_READY_FULLSPEED_STATE.String():
+		return genesissdk.POD_READY_FULLSPEED_STATE
+	case genesissdk.POD_READY_CATNAP_STATE.String():
+		return genesissdk.POD_READY_CATNAP_STATE
+	case genesissdk.POD_READY_RUNNING_STATE.String():
+		return genesissdk.POD_READY_RUNNING_STATE
+	case genesissdk.POD_READY_LONGNAP_STATE.String():
+		return genesissdk.POD_READY_LONGNAP_STATE
+	case genesissdk.POD_INITIALIZING_STATE.String():
+		return genesissdk.POD_INITIALIZING_STATE
+	case genesissdk.POD_WARMINGUP_STATE.String():
+		return genesissdk.POD_WARMINGUP_STATE
 	default:
-		return types.POD_UNKNOWN_STATE
+		return genesissdk.POD_UNKNOWN_STATE
 	}
 }
 
-func GetPodEndpointState(pod *corev1.Pod) types.PodEndpointState {
-	endpoint, ok := pod.GetLabels()[types.ENDPOINT_LABEL]
+func GetPodEndpointState(pod *corev1.Pod) genesissdk.PodEndpointState {
+	endpoint, ok := pod.GetLabels()[genesissdk.ENDPOINT_LABEL]
 	if !ok {
-		return types.ENDPOINT_UNKNOWN
+		return genesissdk.ENDPOINT_UNKNOWN
 	}
 
 	switch endpoint {
-	case string(types.ENDPOINT_DOWN):
-		return types.ENDPOINT_DOWN
-	case string(types.ENDPOINT_UP):
-		return types.ENDPOINT_UP
+	case string(genesissdk.ENDPOINT_DOWN):
+		return genesissdk.ENDPOINT_DOWN
+	case string(genesissdk.ENDPOINT_UP):
+		return genesissdk.ENDPOINT_UP
 	default:
-		return types.ENDPOINT_UNKNOWN
+		return genesissdk.ENDPOINT_UNKNOWN
 	}
 }
 
-func GetPodServiceType(pod *corev1.Pod) types.PodServiceType {
-	serviceType, ok := pod.GetLabels()[types.SERVICE_TYPE_LABEL]
+func GetPodServiceType(pod *corev1.Pod) genesissdk.PodServiceType {
+	serviceType, ok := pod.GetLabels()[genesissdk.SERVICE_TYPE_LABEL]
 	if !ok {
-		return types.SERVICE_TYPE_UNKNOWN
+		return genesissdk.SERVICE_TYPE_UNKNOWN
 	}
 
-	if serviceType == types.SERVICE_TYPE_BE.String() {
-		return types.SERVICE_TYPE_BE
-	} else if serviceType == types.SERVICE_TYPE_LC.String() {
-		return types.SERVICE_TYPE_LC
+	if serviceType == genesissdk.SERVICE_TYPE_BE.String() {
+		return genesissdk.SERVICE_TYPE_BE
+	} else if serviceType == genesissdk.SERVICE_TYPE_LC.String() {
+		return genesissdk.SERVICE_TYPE_LC
 	}
 
-	return types.SERVICE_TYPE_UNKNOWN
+	return genesissdk.SERVICE_TYPE_UNKNOWN
 }
 
 func GetPodThrottleTarget(pod *corev1.Pod) float64 {
-	throttleTarget, err := strconv.ParseFloat(pod.GetLabels()[types.CPU_THROTTLE_TARGET_LABEL], 64)
+	throttleTarget, err := strconv.ParseFloat(pod.GetLabels()[genesissdk.CPU_THROTTLE_TARGET_LABEL], 64)
 	if err != nil {
 		// 默认 throttled target 为0.1
 		throttleTarget = 0.1
